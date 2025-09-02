@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub PR Stats</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Reserve vertical scrollbar gutter to avoid layout shift when content grows */
+    html { scrollbar-gutter: stable; }
+
+    /* Make first column flexible and others only as wide as needed */
+    #results table { table-layout: auto; }
+    #results table th:not(:first-child),
+    #results table td:not(:first-child) {
+      white-space: nowrap;   /* keep content in one line */
+      width: 1%;             /* minimal width; expands to content size */
+    }
+    #results table th:first-child,
+    #results table td:first-child {
+      width: auto;           /* take remaining space */
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-gray-100 flex flex-col items-center relative overflow-y-scroll">
+
+  <!-- Background image -->
+  <div class="fixed inset-0 pointer-events-none">
+    <img src="https://images.unsplash.com/photo-1519389950473-47ba0277781c" 
+         alt="Background" 
+         class="w-full h-full object-cover opacity-20 select-none">
+  </div>
+
+  <!-- Content -->
+  <div class="relative z-10 w-full max-w-5xl p-6">
+
+    <!-- Header -->
+    <header class="text-center mb-6">
+      <h1 class="text-3xl font-bold text-gray-800">Peer Review Statistic</h1>
+      <p class="mt-2 text-gray-700">
+        See how many pull requests each user has opened per month, along with how many of them were approved and merged. 
+      </p>
+      <p>
+        <b>NOTE: all processing is done in your browser; no data is sent to any server.</b>
+      </p>
+    </header>
+
+    <!-- Form -->
+    <form id="prForm" class="bg-white shadow-lg rounded-2xl p-6 md:p-8 grid gap-4 md:gap-6 w-full">
+      <input type="text" id="token" placeholder="GitHub Token" required
+             class="border p-3 rounded-lg w-full focus:ring-2 focus:ring-blue-400">
+      <input type="text" id="repo" placeholder="Repositories (e.g. owner1/repo1, owner2/repo2) or leave blank for all private repos"
+             class="border p-3 rounded-lg w-full focus:ring-2 focus:ring-blue-400">
+      <input type="date" id="dateFrom" class="border p-3 rounded-lg w-full focus:ring-2 focus:ring-blue-400">
+      <input type="date" id="dateTo" class="border p-3 rounded-lg w-full focus:ring-2 focus:ring-blue-400">
+      <button type="submit" 
+              class="bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 transition w-full md:w-auto">
+        Get Stats
+      </button>
+    </form>
+
+    <!-- Results -->
+    <div id="results" class="mt-8 bg-white shadow-md rounded-lg p-4 overflow-x-auto hidden">
+      <table class="w-full border-collapse table-auto">
+        <thead>
+          <tr class="bg-blue-600 text-white text-left">
+            <th class="p-3">User</th>
+            <th class="p-3">Month</th>
+            <th class="p-3">PRs</th>
+            <th class="p-3">Approved PRs</th>
+            <th class="p-3">Merged PRs</th>
+          </tr>
+        </thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
+    </div>
+
+    <!-- Progress overlay -->
+    <div id="progressPanel" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/30">
+      <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-lg">
+        <div class="text-lg font-semibold mb-2">Working…</div>
+        <div id="progressStatus" class="text-sm text-gray-700 mb-1">Preparing…</div>
+        <div class="w-full bg-gray-200 rounded h-3 overflow-hidden">
+          <div id="overallBar" class="h-3 bg-blue-600" style="width: 0%"></div>
+        </div>
+        <div class="flex justify-between text-xs text-gray-600 mt-1">
+          <span>Overall</span>
+          <span id="overallPct">0%</span>
+        </div>
+
+        <div id="subLabel" class="text-sm text-gray-700 mt-4 mb-1">Subtask</div>
+        <div class="w-full bg-gray-200 rounded h-3 overflow-hidden">
+          <div id="subBar" class="h-3 bg-emerald-600" style="width: 0%"></div>
+        </div>
+        <div class="flex justify-between text-xs text-gray-600 mt-1">
+          <span id="progressDetail">Starting…</span>
+          <span id="subPct">0%</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    async function getPRStats(token, repos, { dateFrom, dateTo } = {}, progress) {
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+      };
+
+      // Support array or comma-separated string
+      const reposArray = Array.isArray(repos)
+        ? repos
+        : String(repos).split(",").map(s => s.trim()).filter(Boolean);
+
+      // Progress counters
+      const totals = { totalPages: 0, fetchedPages: 0, totalReviews: 0, fetchedReviews: 0 };
+      const updateOverall = () => {
+        const denomPages = Math.max(totals.totalPages, totals.fetchedPages); // grow if unknown
+        const denomReviews = Math.max(totals.totalReviews, totals.fetchedReviews);
+        const done = totals.fetchedPages + totals.fetchedReviews;
+        const total = denomPages + denomReviews || 1;
+        progress?.setOverall(done, total);
+      };
+
+      progress?.setStatus("Fetching pull request lists…");
+      progress?.setSubLabel("Current repository pages");
+
+      // Fetch all PRs for all repos via pagination
+      let prs = [];
+      for (let i = 0; i < reposArray.length; i++) {
+        const repo = reposArray[i];
+        let page = 1;
+        let repoLastPage = null;
+        let repoFetchedPages = 0;
+
+        while (true) {
+          const url = new URL(`https://api.github.com/repos/${repo}/pulls`);
+          url.searchParams.set("state", "all");
+          url.searchParams.set("per_page", "100");
+          url.searchParams.set("page", page);
+
+          progress?.setDetail(`Repo ${i + 1}/${reposArray.length}: ${repo} — page ${page}${repoLastPage ? " of " + repoLastPage : ""}`);
+          const resp = await fetch(url, { headers });
+          if (!resp.ok) throw new Error(`GitHub API error for ${repo}: ${resp.status} ${resp.statusText}`);
+          if (page === 1) {
+            const last = parseLastPage(resp.headers.get("Link"));
+            if (last) {
+              repoLastPage = last;
+              totals.totalPages += last;
+            } else {
+              // Unknown total; count pages as we go
+              totals.totalPages += 1;
+            }
+          }
+
+          const data = await resp.json();
+
+          // tag PRs with their repo to keep them identifiable later
+          for (const pr of data) pr._repo = repo;
+          prs = prs.concat(data);
+
+          // Progress update for pages
+          repoFetchedPages++;
+          totals.fetchedPages++;
+          progress?.setSub(repoFetchedPages, repoLastPage ?? repoFetchedPages);
+          updateOverall();
+
+          if (data.length < 100) break;
+          // If total unknown, add one more page to total as we discover more
+          if (!repoLastPage) totals.totalPages += 1;
+          page++;
+        }
+      }
+
+      // Filter by date range
+      if (dateFrom || dateTo) {
+        const from = dateFrom ? new Date(dateFrom) : null;
+        const to = dateTo ? new Date(dateTo) : null;
+        prs = prs.filter(pr => {
+          const created = new Date(pr.created_at);
+          if (from && created < from) return false;
+          if (to && created > to) return false;
+          return true;
+        });
+      }
+
+      // Check approved PRs (keyed by repo+number to avoid collisions)
+      progress?.setStatus("Fetching reviews…");
+      progress?.setSubLabel("Pull request reviews");
+      progress?.setDetail(`0 of ${prs.length} reviews fetched`);
+      totals.totalReviews = prs.length;
+      progress?.setSub(0, totals.totalReviews);
+      updateOverall();
+
+      const approvedSet = new Set();
+      for (let idx = 0; idx < prs.length; idx++) {
+        const pr = prs[idx];
+        const reviewsResp = await fetch(
+          `https://api.github.com/repos/${pr._repo}/pulls/${pr.number}/reviews`,
+          { headers }
+        );
+        if (reviewsResp.ok) {
+          const reviews = await reviewsResp.json();
+          if (reviews.some(r => r.state === "APPROVED")) {
+            approvedSet.add(`${pr._repo}#${pr.number}`);
+          }
+        }
+        totals.fetchedReviews++;
+        progress?.setDetail(`${Math.min(totals.fetchedReviews, totals.totalReviews)} of ${totals.totalReviews} reviews fetched`);
+        progress?.setSub(totals.fetchedReviews, totals.totalReviews);
+        updateOverall();
+      }
+
+      // Aggregate across all repos
+      const grouped = {};
+      for (const pr of prs) {
+        const user = pr.user?.login || "unknown";
+        const month = pr.created_at.slice(0, 7);
+        if (!grouped[user]) grouped[user] = {};
+        if (!grouped[user][month]) grouped[user][month] = { count: 0, approved: 0, merged: 0 };
+        grouped[user][month].count++;
+        if (approvedSet.has(`${pr._repo}#${pr.number}`)) {
+          grouped[user][month].approved++;
+        }
+        if (pr.merged_at) {
+          grouped[user][month].merged++;
+        }
+      }
+
+      // Flatten
+      const rows = [];
+      const users = Object.keys(grouped).sort();
+      for (const user of users) {
+        const months = Object.keys(grouped[user]).sort();
+        for (const m of months) {
+          rows.push({
+            user,
+            month: m,
+            count: grouped[user][m].count,
+            approved: grouped[user][m].approved,
+            merged: grouped[user][m].merged
+          });
+        }
+      }
+      return rows;
+    }
+
+    // Progress UI helpers
+    function createProgressUI() {
+      const panel = document.getElementById("progressPanel");
+      const overallBar = document.getElementById("overallBar");
+      const overallPct = document.getElementById("overallPct");
+      const subBar = document.getElementById("subBar");
+      const subPct = document.getElementById("subPct");
+      const statusEl = document.getElementById("progressStatus");
+      const detailEl = document.getElementById("progressDetail");
+      const subLabelEl = document.getElementById("subLabel");
+
+      function open() {
+        panel.classList.remove("hidden");
+        panel.classList.add("flex");
+      }
+      function close() {
+        panel.classList.add("hidden");
+        panel.classList.remove("flex");
+      }
+      function setStatus(text) { statusEl.textContent = text; }
+      function setDetail(text) { detailEl.textContent = text; }
+      function setSubLabel(text) { subLabelEl.textContent = text; }
+      function setOverall(done, total) {
+        const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+        overallBar.style.width = pct + "%";
+        overallPct.textContent = pct + "%";
+      }
+      function setSub(done, total) {
+        const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+        subBar.style.width = pct + "%";
+        subPct.textContent = pct + "%";
+      }
+      return { open, close, setStatus, setDetail, setSubLabel, setOverall, setSub };
+    }
+
+    // Utility: parse Link header to find last page number if present
+    function parseLastPage(linkHeader) {
+      if (!linkHeader) return null;
+      const parts = linkHeader.split(",");
+      for (const part of parts) {
+        const [urlPart, relPart] = part.split(";");
+        if (relPart && relPart.includes('rel="last"')) {
+          const m = urlPart.match(/[?&]page=(\d+)/);
+          if (m) return parseInt(m[1], 10);
+        }
+      }
+      return null;
+    }
+
+    async function getAllPrivateRepos(token) {
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+      };
+      let repos = [];
+      let page = 1;
+      while (true) {
+        const url = new URL("https://api.github.com/user/repos");
+        url.searchParams.set("visibility", "private");
+        url.searchParams.set("per_page", "100");
+        url.searchParams.set("page", page);
+        const resp = await fetch(url, { headers });
+        if (!resp.ok) throw new Error(`GitHub API error (repos): ${resp.status} ${resp.statusText}`);
+        const data = await resp.json();
+        repos = repos.concat(data);
+        if (data.length < 100) break;
+        page++;
+      }
+      // Return as ["owner/repo", ...]
+      return repos.map(r => r.full_name);
+    }
+
+    // Handle form
+    document.getElementById("prForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const token = document.getElementById("token").value;
+      const repoInput = document.getElementById("repo").value.trim();
+      const dateFrom = document.getElementById("dateFrom").value;
+      const dateTo = document.getElementById("dateTo").value;
+
+      const resultsDiv = document.getElementById("results");
+      const tbody = document.getElementById("resultsBody");
+      tbody.innerHTML = "";
+      resultsDiv.classList.remove("hidden");
+
+      const progress = createProgressUI();
+      progress.open();
+
+      try {
+        let repos;
+        if (!repoInput) {
+          progress.setStatus("Fetching all private repositories…");
+          repos = await getAllPrivateRepos(token);
+          if (repos.length === 0) throw new Error("No private repositories found for this token.");
+          if (repos.length > 5) {
+            progress.close();
+            if (!confirm(`You have ${repos.length} private repositories. This may take a long time and hit API rate limits. Proceed?`)) {
+              return;
+            }
+            progress.open();
+          }
+        } else {
+          repos = repoInput.split(",").map(s => s.trim()).filter(Boolean);
+        }
+
+        const stats = await getPRStats(token, repos, { dateFrom, dateTo }, progress);
+
+        // Group by user to compute totals and keep monthly breakdown
+        const byUser = new Map();
+        for (const r of stats) {
+          const entry = byUser.get(r.user) || { totalCount: 0, totalApproved: 0, totalMerged: 0, months: [] };
+          entry.totalCount += r.count;
+          entry.totalApproved += r.approved;
+          entry.totalMerged += r.merged;
+          entry.months.push({ month: r.month, count: r.count, approved: r.approved, merged: r.merged });
+          byUser.set(r.user, entry);
+        }
+
+        const usersSorted = Array.from(byUser.keys()).sort();
+        for (const user of usersSorted) {
+          const entry = byUser.get(user);
+
+          // Summary row (clickable) with inline SVG chevron
+          const tr = document.createElement("tr");
+          tr.className = "summary-row cursor-pointer bg-gray-50 hover:bg-gray-100";
+          tr.dataset.user = user;
+          tr.innerHTML = `
+            <td class="p-3 border font-medium">
+              <span class="mr-2 inline-block">
+                <svg data-icon class="w-3 h-3 inline-block align-middle transition-transform" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+                </svg>
+              </span>${user}
+            </td>
+            <td class="p-3 border text-gray-500">All</td>
+            <td class="p-3 border font-semibold">${entry.totalCount}</td>
+            <td class="p-3 border font-semibold">${entry.totalApproved}</td>
+            <td class="p-3 border font-semibold">${entry.totalMerged}</td>
+          `;
+          tbody.appendChild(tr);
+
+          // Detail rows (per month), hidden by default
+          const monthsSorted = entry.months.sort((a, b) => a.month.localeCompare(b.month));
+          for (const m of monthsSorted) {
+            const dtr = document.createElement("tr");
+            dtr.className = "detail-row hidden";
+            dtr.dataset.parent = user;
+            dtr.innerHTML = `
+              <td class="p-3 border pl-8 text-gray-500"></td>
+              <td class="p-3 border">${m.month}</td>
+              <td class="p-3 border">${m.count}</td>
+              <td class="p-3 border">${m.approved}</td>
+              <td class="p-3 border">${m.merged}</td>
+            `;
+            tbody.appendChild(dtr);
+          }
+        }
+
+        // Delegate click to toggle details per user (rotates the SVG chevron)
+        if (!tbody.dataset.toggleBound) {
+          tbody.addEventListener("click", (evt) => {
+            const row = evt.target.closest("tr.summary-row");
+            if (!row) return;
+            const user = row.dataset.user;
+            const shouldOpen = row.dataset.expanded !== "1";
+            document.querySelectorAll(`tr.detail-row[data-parent="${CSS.escape(user)}"]`).forEach(r => {
+              if (shouldOpen) r.classList.remove("hidden"); else r.classList.add("hidden");
+            });
+            const icon = row.querySelector("[data-icon]");
+            if (icon) icon.style.transform = shouldOpen ? "rotate(90deg)" : "rotate(0deg)";
+            row.dataset.expanded = shouldOpen ? "1" : "0";
+          });
+          tbody.dataset.toggleBound = "1";
+        }
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        progress.close();
+      }
+    });
+  </script>
+</body>
+</html>
