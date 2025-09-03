@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub PR Insights</title>
+  <!-- For production, use Tailwind via npm and build CSS locally. Example: -->
+  <!-- <link href="dist/tailwind.css" rel="stylesheet"> -->
+  <!-- Remove the CDN script below for production use. -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Reserve vertical scrollbar gutter to avoid layout shift when content grows */
+    html { scrollbar-gutter: stable; }
+
+    /* Make first column flexible and others only as wide as needed */
+    #results table { table-layout: auto; }
+    #results table th:not(:first-child),
+    #results table td:not(:first-child) {
+      white-space: nowrap;
+      width: 1%;
+    }
+    #results table th:first-child,
+    #results table td:first-child {
+      width: auto;
+    }
+    #results table th:nth-child(2),
+    #results table td:nth-child(2) {
+      min-width: 80px;
+      width: 80px;
+      max-width: 80px;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-gray-100 flex flex-col items-center relative overflow-y-scroll">
+
+  <!-- Background image -->
+  <div class="fixed inset-0 pointer-events-none">
+    <img src="https://images.unsplash.com/photo-1519389950473-47ba0277781c" 
+         alt="Background" 
+         class="w-full h-full object-cover opacity-20 select-none">
+  </div>
+
+  <!-- Content -->
+  <div class="relative z-10 w-full max-w-5xl p-6">
+
+    <!-- Header -->
+    <header class="text-center mb-6">
+      <h1 class="text-3xl font-bold text-gray-800">Pull Request Insights</h1>
+      <p class="mt-2 text-gray-700">
+        This tool analyzes GitHub pull requests and peer reviews for selected repositories and date ranges. 
+        It shows per-user and per-month stats including PR counts, approvals, merges, reviews, average comments, and estimated review times.
+      </p>
+      <p>
+        <b>NOTE: all processing is done in your browser; no data is sent to any server.</b>
+      </p>
+    </header>
+
+    <!-- Form -->
+    <form id="prForm" class="bg-white shadow-lg rounded p-6 md:p-8 grid gap-4 md:gap-6 w-full">
+      <input type="text" id="token" placeholder="GitHub Token" required
+             class="border p-3 rounded w-full focus:ring-2 focus:ring-blue-400">
+      <input type="text" id="repo" placeholder="Repositories (e.g. owner1/repo1, owner2/repo2) or leave blank for all private repos"
+             class="border p-3 rounded w-full focus:ring-2 focus:ring-blue-400">
+      <input type="date" id="dateFrom" class="border p-3 rounded w-full focus:ring-2 focus:ring-blue-400">
+      <input type="date" id="dateTo" class="border p-3 rounded w-full focus:ring-2 focus:ring-blue-400">
+      <button type="submit" 
+              class="bg-blue-600 text-white py-3 px-6 rounded hover:bg-blue-700 transition w-full md:w-auto">
+        Get Insights
+      </button>
+    </form>
+
+    <!-- Results -->
+    <div id="results" class="mt-8 bg-white shadow-md rounded p-4 overflow-x-auto hidden">
+      <!-- PR Table -->
+      <div id="prTablePanel" class="mb-8 hidden">
+        <h2 class="text-xl font-semibold mb-2 text-blue-900">Pull Requests</h2>
+        <table class="w-full border-collapse table-auto">
+          <thead>
+            <tr class="bg-blue-600 text-white text-left">
+              <th class="p-3">User</th>
+              <th class="p-3">Month</th>
+              <th class="p-3">Submitted</th>
+              <th class="p-3">Merged</th>
+              <th class="p-3">Avg Merge (hrs)</th>
+            </tr>
+          </thead>
+          <tbody id="prTableBody"></tbody>
+        </table>
+      </div>
+      <!-- Peer Review Table -->
+      <div id="reviewTablePanel" class="hidden">
+        <h2 class="text-xl font-semibold mb-2 text-blue-900">Peer Reviews</h2>
+        <table class="w-full border-collapse table-auto">
+          <thead>
+            <tr class="bg-blue-600 text-white text-left">
+              <th class="p-3">User</th>
+              <th class="p-3">Month</th>
+              <th class="p-3">Reviewed</th>
+              <th class="p-3">Avg Comments</th>
+              <th class="p-3">Avg Review (min)</th>
+            </tr>
+          </thead>
+          <tbody id="reviewTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Progress overlay -->
+    <div id="progressPanel" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/30">
+      <div class="bg-white shadow-2xl rounded p-6 w-full max-w-lg"
+           style="position:absolute;left:50%;top:0;transform:translateX(-50%);margin-top:200px;">
+        <div class="text-lg font-semibold mb-2">Working…</div>
+        <div id="progressStatus" class="text-sm text-gray-700 mb-1">Preparing…</div>
+        <div class="w-full bg-gray-200 rounded h-3 overflow-hidden">
+          <div id="overallBar" class="h-3 bg-blue-600" style="width: 0%"></div>
+        </div>
+        <div class="flex justify-between text-xs text-gray-600 mt-1">
+          <span>Overall</span>
+          <span id="overallPct">0%</span>
+        </div>
+        <div id="subLabel" class="text-sm text-gray-700 mt-4 mb-1">Subtask</div>
+        <div class="w-full bg-gray-200 rounded h-3 overflow-hidden">
+          <div id="subBar" class="h-3 bg-emerald-600" style="width: 0%"></div>
+        </div>
+        <div class="flex justify-between text-xs text-gray-600 mt-1">
+          <span id="progressDetail">Starting…</span>
+          <span id="subPct">0%</span>
+        </div>
+        <div id="apiUsage" class="text-xs text-gray-500 mt-4 mb-2"></div>
+      </div>
+    </div>
+
+    <!-- Modal for PR list -->
+    <div id="prModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40">
+      <div class="bg-white shadow-2xl rounded p-6 w-full max-w-2xl">
+        <div class="flex justify-between items-center mb-4">
+          <div class="text-lg font-semibold" id="prModalTitle">Related Pull Requests</div>
+          <button id="prModalClose" class="text-gray-500 hover:text-gray-800 text-xl">&times;</button>
+        </div>
+        <div id="prModalContent" class="space-y-2 overflow-y-auto" style="max-height:60vh"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    async function fetchAllPRs(token, reposArray, progress, headers, totals, updateOverall) {
+      let prs = [];
+
+      for (let i = 0; i < reposArray.length; i++) {
+        const repo = reposArray[i];
+        let page = 1;
+        let repoLastPage = null;
+        let repoFetchedPages = 0;
+        while (true) {
+          const url = new URL(`https://api.github.com/repos/${repo}/pulls`);
+          url.searchParams.set("state", "all");
+          url.searchParams.set("per_page", "100");
+          url.searchParams.set("page", page);
+          progress?.setDetail(`Repo ${i + 1}/${reposArray.length}: ${repo} — page ${page}${repoLastPage ? " of " + repoLastPage : ""}`);
+          const resp = await fetch(url, { headers });
+          progress?.incApiUsage(resp);
+          if (!resp.ok) throw new Error(`GitHub API error for ${repo}: ${resp.status} ${resp.statusText}`);
+          if (page === 1) {
+            const last = parseLastPage(resp.headers.get("Link"));
+            if (last) {
+              repoLastPage = last;
+              totals.totalPages += last;
+            } else {
+              totals.totalPages += 1;
+            }
+          }
+          const data = await resp.json();
+          for (const pr of data) pr._repo = repo;
+          prs = prs.concat(data);
+          repoFetchedPages++;
+          totals.fetchedPages++;
+          progress?.setSub(repoFetchedPages, repoLastPage ?? repoFetchedPages);
+          if (typeof updateOverall === "function") updateOverall();
+          updateOverall();
+
+          if (data.length < 100) break;
+          if (!repoLastPage) totals.totalPages += 1;
+          page++;
+        }
+      }
+      return prs;
+    }
+
+    function filterPRsByDate(prs, dateFrom, dateTo) {
+      if (!dateFrom && !dateTo) return prs;
+      const from = dateFrom ? new Date(dateFrom) : null;
+      const to = dateTo ? new Date(dateTo) : null;
+      return prs.filter(pr => {
+        const created = new Date(pr.created_at);
+        if (from && created < from) return false;
+        if (to && created > to) return false;
+        return true;
+      });
+    }
+
+    // Move updateOverall inside getPRStats so totals is in scope
+    async function getPRStats(token, repos, { dateFrom, dateTo } = {}, progress) {
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+      };
+      const reposArray = Array.isArray(repos)
+        ? repos
+        : String(repos).split(",").map(s => s.trim()).filter(Boolean);
+      const totals = { totalPages: 0, fetchedPages: 0, totalReviews: 0, fetchedReviews: 0 };
+      function updateOverall() {
+        const denomPages = Math.max(totals.totalPages, totals.fetchedPages);
+        const denomReviews = Math.max(totals.totalReviews, totals.fetchedReviews);
+        const done = totals.fetchedPages + totals.fetchedReviews;
+        const total = denomPages + denomReviews || 1;
+        progress?.setOverall(done, total);
+      }
+
+      progress?.setStatus("Fetching pull request lists…");
+      progress?.setSubLabel("Current repository pages");
+
+      let prs = await fetchAllPRs(token, reposArray, progress, headers, totals, updateOverall);
+      prs = filterPRsByDate(prs, dateFrom, dateTo);
+
+      progress?.setStatus("Fetching reviews…");
+      progress?.setSubLabel("Pull request reviews");
+      progress?.setDetail(`0 of ${prs.length} reviews fetched`);
+      totals.totalReviews = prs.length;
+      progress?.setSub(0, totals.totalReviews);
+      updateOverall();
+
+      // Pass updateOverall and totals to fetchPRReviewsAndComments
+      const reviewStats = await fetchPRReviewsAndComments(prs, headers, progress, totals, updateOverall);
+      const grouped = aggregateStats(prs, reviewStats.approvedSet);
+      const rows = flattenStats(
+        grouped,
+        reviewStats.logicalReviewsByUserMonth,
+        reviewStats.commentsByUserMonth,
+        reviewStats.reviewTimeByUserMonth,
+        reviewStats.prMapByUserMonth,
+        reviewStats.approvedMapByUserMonth,
+        reviewStats.mergedMapByUserMonth,
+        reviewStats.reviewedMapByUserMonth
+      );
+      return rows;
+    }
+
+    // Update fetchPRReviewsAndComments to accept updateOverall as argument
+    async function fetchPRReviewsAndComments(prs, headers, progress, totals, updateOverall) {
+      const approvedSet = new Set();
+      const reviewsDoneByUserMonth = {};
+      const logicalReviewsByUserMonth = {};
+      const commentsByUserMonth = {};
+      const reviewTimeByUserMonth = {};
+      const prMapByUserMonth = {};
+      const approvedMapByUserMonth = {};
+      const mergedMapByUserMonth = {};
+      const reviewedMapByUserMonth = {};
+
+      for (let idx = 0; idx < prs.length; idx++) {
+        const pr = prs[idx];
+        // Fetch reviews
+        const reviewsResp = await fetch(
+          `https://api.github.com/repos/${pr._repo}/pulls/${pr.number}/reviews`,
+          { headers }
+        );
+        progress?.incApiUsage(reviewsResp);
+        let reviews = [];
+        if (reviewsResp.ok) {
+          reviews = await reviewsResp.json();
+          pr._reviews = reviews;
+        }
+        // Fetch review comments for this PR
+        const commentsResp = await fetch(
+          `https://api.github.com/repos/${pr._repo}/pulls/${pr.number}/comments`,
+          { headers }
+        );
+        progress?.incApiUsage(commentsResp);
+        let reviewComments = [];
+        if (commentsResp.ok) {
+          reviewComments = await commentsResp.json();
+        }
+        if (reviews.some(r => r.state === "APPROVED")) {
+          approvedSet.add(`${pr._repo}#${pr.number}`);
+        }
+        const prMonth = pr.created_at.slice(0, 7);
+        // Group reviews by user
+        const reviewsByUser = {};
+        for (const r of reviews) {
+          if (r.user?.login && r.user.login !== pr.user?.login) {
+            if (!reviewsByUser[r.user.login]) reviewsByUser[r.user.login] = [];
+            reviewsByUser[r.user.login].push(r);
+          }
+        }
+        // Group review comments by user and time
+        const commentsByUser = {};
+        for (const c of reviewComments) {
+          if (c.user?.login) {
+            if (!commentsByUser[c.user.login]) commentsByUser[c.user.login] = [];
+            commentsByUser[c.user.login].push(c);
+          }
+        }
+        // For each reviewer, group reviews within 10 min as one logical review
+        for (const reviewer in reviewsByUser) {
+          const userReviews = reviewsByUser[reviewer].slice().sort((a, b) => new Date(a.submitted_at) - new Date(b.submitted_at));
+          let logicalGroups = [];
+          let currentGroup = [];
+          let lastTime = null;
+          for (const review of userReviews) {
+            const reviewTime = new Date(review.submitted_at);
+            if (!lastTime || (reviewTime - lastTime) > 10 * 60 * 1000) {
+              if (currentGroup.length) logicalGroups.push(currentGroup);
+              currentGroup = [review];
+            } else {
+              currentGroup.push(review);
+            }
+            lastTime = reviewTime;
+          }
+          if (currentGroup.length) logicalGroups.push(currentGroup);
+          // Count logical reviews
+          logicalReviewsByUserMonth[reviewer] = logicalReviewsByUserMonth[reviewer] || {};
+          logicalReviewsByUserMonth[reviewer][prMonth] = (logicalReviewsByUserMonth[reviewer][prMonth] || 0) + logicalGroups.length;
+          // Count comments for logical reviews
+          commentsByUserMonth[reviewer] = commentsByUserMonth[reviewer] || {};
+          commentsByUserMonth[reviewer][prMonth] = commentsByUserMonth[reviewer][prMonth] || 0;
+          reviewTimeByUserMonth[reviewer] = reviewTimeByUserMonth[reviewer] || {};
+          reviewTimeByUserMonth[reviewer][prMonth] = reviewTimeByUserMonth[reviewer][prMonth] || 0;
+          for (const group of logicalGroups) {
+            // For each logical review, count comments by reviewer within the time window of the group
+            let groupStart = new Date(group[0].submitted_at);
+            let groupEnd = new Date(group[group.length - 1].submitted_at);
+            let commentTimes = [];
+            let commentCount = 0;
+            if (commentsByUser[reviewer]) {
+              for (const c of commentsByUser[reviewer]) {
+                const cTime = new Date(c.created_at);
+                if (cTime >= groupStart && cTime <= groupEnd) {
+                  commentCount++;
+                  commentTimes.push(cTime);
+                }
+              }
+            }
+            // Also count review bodies (if present)
+            for (const review of group) {
+              if (review.body && review.body.trim()) {
+                commentCount++;
+                commentTimes.push(new Date(review.submitted_at));
+              }
+            }
+            commentsByUserMonth[reviewer][prMonth] += commentCount;
+            // Calculate review time for this logical review
+            let reviewDurationMin = 3;
+            if (commentTimes.length > 1) {
+              const minTime = Math.min(...commentTimes.map(d => d.getTime()));
+              const maxTime = Math.max(...commentTimes.map(d => d.getTime()));
+              reviewDurationMin += (maxTime - minTime) / 60000;
+            }
+            reviewTimeByUserMonth[reviewer][prMonth] += reviewDurationMin;
+          }
+          reviewsDoneByUserMonth[reviewer] = reviewsDoneByUserMonth[reviewer] || {};
+          reviewsDoneByUserMonth[reviewer][prMonth] = logicalReviewsByUserMonth[reviewer][prMonth];
+        }
+        // Map PRs for submitter
+        const user = pr.user?.login || "unknown";
+        prMapByUserMonth[user] = prMapByUserMonth[user] || {};
+        prMapByUserMonth[user][prMonth] = prMapByUserMonth[user][prMonth] || [];
+        prMapByUserMonth[user][prMonth].push(pr);
+
+        // Approved PRs
+        if (reviews.some(r => r.state === "APPROVED")) {
+          approvedMapByUserMonth[user] = approvedMapByUserMonth[user] || {};
+          approvedMapByUserMonth[user][prMonth] = approvedMapByUserMonth[user][prMonth] || [];
+          approvedMapByUserMonth[user][prMonth].push(pr);
+        }
+        // Merged PRs
+        if (pr.merged_at) {
+          mergedMapByUserMonth[user] = mergedMapByUserMonth[user] || {};
+          mergedMapByUserMonth[user][prMonth] = mergedMapByUserMonth[user][prMonth] || [];
+          mergedMapByUserMonth[user][prMonth].push(pr);
+        }
+        // Reviews done by other users
+        for (const r of reviews) {
+          if (r.user?.login && r.user.login !== user) {
+            reviewedMapByUserMonth[r.user.login] = reviewedMapByUserMonth[r.user.login] || {};
+            reviewedMapByUserMonth[r.user.login][prMonth] = reviewedMapByUserMonth[r.user.login][prMonth] || [];
+            reviewedMapByUserMonth[r.user.login][prMonth].push({
+              pr,
+              review: r
+            });
+          }
+        }
+        totals.fetchedReviews++;
+        progress?.setDetail(`${Math.min(totals.fetchedReviews, totals.totalReviews)} of ${totals.totalReviews} reviews fetched`);
+        progress?.setSub(totals.fetchedReviews, totals.totalReviews);
+        if (typeof updateOverall === "function") updateOverall();
+      }
+
+      return {
+        approvedSet,
+        reviewsDoneByUserMonth,
+        logicalReviewsByUserMonth,
+        commentsByUserMonth,
+        reviewTimeByUserMonth,
+        prMapByUserMonth,
+        approvedMapByUserMonth,
+        mergedMapByUserMonth,
+        reviewedMapByUserMonth
+      };
+    }
+
+    function aggregateStats(prs, approvedSet) {
+      const grouped = {};
+      for (const pr of prs) {
+        const user = pr.user?.login || "unknown";
+        const month = pr.created_at.slice(0, 7);
+        if (!grouped[user]) grouped[user] = {};
+        if (!grouped[user][month]) grouped[user][month] = { count: 0, approved: 0, merged: 0 };
+        grouped[user][month].count++;
+        if (approvedSet.has(`${pr._repo}#${pr.number}`)) {
+          grouped[user][month].approved++;
+        }
+        if (pr.merged_at) {
+          grouped[user][month].merged++;
+        }
+      }
+      return grouped;
+    }
+
+    function flattenStats(
+      grouped,
+      logicalReviewsByUserMonth,
+      commentsByUserMonth,
+      reviewTimeByUserMonth,
+      prMapByUserMonth,
+      approvedMapByUserMonth,
+      mergedMapByUserMonth,
+      reviewedMapByUserMonth
+    ) {
+      const rows = [];
+      const users = Object.keys(grouped).sort();
+      for (const user of users) {
+        const months = Object.keys(grouped[user]).sort();
+        for (const m of months) {
+          // Calculate avgMergeTime for merged PRs
+          const mergedList = mergedMapByUserMonth[user]?.[m] || [];
+          let totalMergeTime = 0;
+          let mergedCount = 0;
+          for (const pr of mergedList) {
+            if (pr.created_at && pr.merged_at) {
+              const created = new Date(pr.created_at);
+              const merged = new Date(pr.merged_at);
+              totalMergeTime += (merged - created) / 3600000; // hours
+              mergedCount++;
+            }
+          }
+          const avgMergeTime = mergedCount > 0 ? (totalMergeTime / mergedCount).toFixed(2) : "0.00";
+          rows.push({
+            user,
+            month: m,
+            count: grouped[user][m].count,
+            merged: grouped[user][m].merged,
+            avgMergeTime,
+            prList: prMapByUserMonth[user]?.[m] || [],
+            mergedList,
+            // ...existing code for review columns...
+          });
+        }
+      }
+      // Add users who only reviewed PRs (did not submit any PRs)
+      for (const reviewer of Object.keys(logicalReviewsByUserMonth)) {
+        if (!grouped[reviewer]) {
+          const months = Object.keys(logicalReviewsByUserMonth[reviewer]).sort();
+          for (const m of months) {
+            const logicalReviews = logicalReviewsByUserMonth[reviewer][m] || 0;
+            const comments = commentsByUserMonth[reviewer]?.[m] || 0;
+            const totalReviewTime = reviewTimeByUserMonth[reviewer]?.[m] || 0;
+            rows.push({
+              user: reviewer,
+              month: m,
+              count: 0,
+              approved: 0,
+              merged: 0,
+              reviewed: logicalReviews,
+              avgCommentsPerReview: logicalReviews > 0 ? (comments / logicalReviews).toFixed(2) : "0.00",
+              avgReviewTime: logicalReviews > 0 ? (totalReviewTime / logicalReviews).toFixed(2) : "0.00",
+              prList: [],
+              approvedList: [],
+              mergedList: [],
+              reviewedList: reviewedMapByUserMonth[reviewer]?.[m] || []
+            });
+          }
+        }
+      }
+      return rows;
+    }
+
+    async function getPRStats(token, repos, { dateFrom, dateTo } = {}, progress) {
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+      };
+      const reposArray = Array.isArray(repos)
+        ? repos
+        : String(repos).split(",").map(s => s.trim()).filter(Boolean);
+      const totals = { totalPages: 0, fetchedPages: 0, totalReviews: 0, fetchedReviews: 0 };
+      function updateOverall() {
+        const denomPages = Math.max(totals.totalPages, totals.fetchedPages);
+        const denomReviews = Math.max(totals.totalReviews, totals.fetchedReviews);
+        const done = totals.fetchedPages + totals.fetchedReviews;
+        const total = denomPages + denomReviews || 1;
+        progress?.setOverall(done, total);
+      }
+
+      progress?.setStatus("Fetching pull request lists…");
+      progress?.setSubLabel("Current repository pages");
+
+      let prs = await fetchAllPRs(token, reposArray, progress, headers, totals, updateOverall);
+      prs = filterPRsByDate(prs, dateFrom, dateTo);
+
+      progress?.setStatus("Fetching reviews…");
+      progress?.setSubLabel("Pull request reviews");
+      progress?.setDetail(`0 of ${prs.length} reviews fetched`);
+      totals.totalReviews = prs.length;
+      progress?.setSub(0, totals.totalReviews);
+      updateOverall();
+
+      // Pass updateOverall and totals to fetchPRReviewsAndComments
+      const reviewStats = await fetchPRReviewsAndComments(prs, headers, progress, totals, updateOverall);
+      const grouped = aggregateStats(prs, reviewStats.approvedSet);
+      const rows = flattenStats(
+        grouped,
+        reviewStats.logicalReviewsByUserMonth,
+        reviewStats.commentsByUserMonth,
+        reviewStats.reviewTimeByUserMonth,
+        reviewStats.prMapByUserMonth,
+        reviewStats.approvedMapByUserMonth,
+        reviewStats.mergedMapByUserMonth,
+        reviewStats.reviewedMapByUserMonth
+      );
+      return rows;
+    }
+
+    // Progress UI helpers
+    function createProgressUI() {
+      const panel = document.getElementById("progressPanel");
+      const overallBar = document.getElementById("overallBar");
+      const overallPct = document.getElementById("overallPct");
+      const subBar = document.getElementById("subBar");
+      const subPct = document.getElementById("subPct");
+      const statusEl = document.getElementById("progressStatus");
+      const detailEl = document.getElementById("progressDetail");
+      const subLabelEl = document.getElementById("subLabel");
+      const apiUsageEl = document.getElementById("apiUsage");
+      let apiCount = 0;
+      let apiRemaining = null;
+
+      function open() {
+        panel.classList.remove("hidden");
+        panel.classList.add("flex");
+      }
+      function close() {
+        panel.classList.add("hidden");
+        panel.classList.remove("flex");
+      }
+      function setStatus(text) { statusEl.textContent = text; }
+      function setDetail(text) { detailEl.textContent = text; }
+      function setSubLabel(text) { subLabelEl.textContent = text; }
+      function setOverall(done, total) {
+        const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+        overallBar.style.width = pct + "%";
+        overallPct.textContent = pct + "%";
+      }
+      function setSub(done, total) {
+        const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+        subBar.style.width = pct + "%";
+        subPct.textContent = pct + "%";
+      }
+      function setApiUsage(count, remaining) {
+        apiUsageEl.textContent = `API requests: ${count}${remaining !== null ? `, quota remaining: ${remaining}` : ""}`;
+      }
+      function incApiUsage(resp) {
+        apiCount++;
+        if (resp && resp.headers) {
+          const rem = resp.headers.get("X-RateLimit-Remaining");
+          if (rem !== null) apiRemaining = rem;
+        }
+        setApiUsage(apiCount, apiRemaining);
+      }
+      function resetApiUsage() {
+        apiCount = 0;
+        apiRemaining = null;
+        setApiUsage(apiCount, apiRemaining);
+      }
+      return { open, close, setStatus, setDetail, setSubLabel, setOverall, setSub, setApiUsage, incApiUsage, resetApiUsage };
+    }
+
+    // Utility: parse Link header to find last page number if present
+    function parseLastPage(linkHeader) {
+      if (!linkHeader) return null;
+      const parts = linkHeader.split(",");
+      for (const part of parts) {
+        const [urlPart, relPart] = part.split(";");
+        if (relPart && relPart.includes('rel="last"')) {
+          const m = urlPart.match(/[?&]page=(\d+)/);
+          if (m) return parseInt(m[1], 10);
+        }
+      }
+      return null;
+    }
+
+    async function getAllPrivateRepos(token, progress) {
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+      };
+      let repos = [];
+      let page = 1;
+      while (true) {
+        const url = new URL("https://api.github.com/user/repos");
+        url.searchParams.set("visibility", "private");
+        url.searchParams.set("per_page", "100");
+        url.searchParams.set("page", page);
+        const resp = await fetch(url, { headers });
+        progress?.incApiUsage(resp);
+        if (!resp.ok) throw new Error(`GitHub API error (repos): ${resp.status} ${resp.statusText}`);
+        const data = await resp.json();
+        repos = repos.concat(data);
+        if (data.length < 100) break;
+        page++;
+      }
+      // Return as ["owner/repo", ...]
+      return repos.map(r => r.full_name);
+    }
+
+    // Add showPRModal function before the form submit handler
+    function showPRModal(title, prArr, isReviewList) {
+      const modal = document.getElementById("prModal");
+      const modalTitle = document.getElementById("prModalTitle");
+      const modalContent = document.getElementById("prModalContent");
+      modalTitle.textContent = title;
+      modalContent.innerHTML = "";
+      if (!prArr || prArr.length === 0) {
+        modalContent.innerHTML = "<div class='text-gray-500'>No pull requests found.</div>";
+      } else {
+        prArr.forEach(item => {
+          let pr, review;
+          if (isReviewList) {
+            pr = item.pr;
+            review = item.review;
+          } else {
+            pr = item;
+          }
+          const prUrl = pr.html_url;
+          const prTitle = pr.title || prUrl;
+          const prNum = pr.number;
+          const repo = pr._repo;
+          let extra = "";
+          if (isReviewList && review) {
+            extra = `<span class="ml-2 text-xs text-gray-500">Review: ${review.state}</span>`;
+          }
+          modalContent.innerHTML += `
+            <div>
+              <a href="${prUrl}" target="_blank" class="text-blue-700 underline font-medium">${repo}#${prNum}: ${prTitle}</a>
+              ${extra}
+            </div>
+          `;
+        });
+      }
+      modal.classList.remove("hidden");
+      modal.classList.add("flex");
+    }
+    document.getElementById("prModalClose").onclick = function() {
+      const modal = document.getElementById("prModal");
+      modal.classList.add("hidden");
+      modal.classList.remove("flex");
+    };
+    document.getElementById("prModal").onclick = function(e) {
+      if (e.target === this) {
+        this.classList.add("hidden");
+        this.classList.remove("flex");
+      }
+    };
+
+    // Handle form
+    document.getElementById("prForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const token = document.getElementById("token").value;
+      const repoInput = document.getElementById("repo").value.trim();
+      let dateFrom = document.getElementById("dateFrom").value;
+      let dateTo = document.getElementById("dateTo").value;
+
+      // Set local time, then convert to UTC ISO string
+      if (dateFrom) {
+        const d = new Date(dateFrom);
+        d.setHours(0, 0, 0, 0);
+        dateFrom = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
+      }
+      if (dateTo) {
+        const d = new Date(dateTo);
+        d.setHours(23, 59, 59, 999);
+        dateTo = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
+      }
+
+      const resultsDiv = document.getElementById("results");
+      const prTablePanel = document.getElementById("prTablePanel");
+      const reviewTablePanel = document.getElementById("reviewTablePanel");
+      resultsDiv.classList.add("hidden");
+      prTablePanel.classList.add("hidden");
+      reviewTablePanel.classList.add("hidden");
+
+      const progress = createProgressUI();
+      progress.open();
+      progress.resetApiUsage();
+
+      try {
+        let repos;
+        if (!repoInput) {
+          progress.setStatus("Fetching all private repositories…");
+          repos = await getAllPrivateRepos(token, progress);
+          if (repos.length === 0) throw new Error("No private repositories found for this token.");
+          if (repos.length > 5) {
+            progress.close();
+            if (!confirm(`You have ${repos.length} private repositories. This may take a long time and hit API rate limits. Proceed?`)) {
+              return;
+            }
+            progress.open();
+          }
+        } else {
+          repos = repoInput.split(",").map(s => s.trim()).filter(Boolean);
+        }
+
+        const stats = await getPRStats(token, repos, { dateFrom, dateTo }, progress);
+
+        // Split stats into PR rows and Review rows
+        const prRows = [];
+        const reviewRows = [];
+        for (const r of stats) {
+          prRows.push({
+            user: r.user,
+            month: r.month,
+            count: r.count,
+            approved: r.approved,
+            merged: r.merged,
+            prList: r.prList,
+            approvedList: r.approvedList,
+            mergedList: r.mergedList
+          });
+          reviewRows.push({
+            user: r.user,
+            month: r.month,
+            reviewed: r.reviewed,
+            avgCommentsPerReview: r.avgCommentsPerReview,
+            avgReviewTime: r.avgReviewTime,
+            reviewedList: r.reviewedList
+          });
+        }
+
+        // Sort both tables by user name ascending
+        prRows.sort((a, b) => a.user.localeCompare(b.user));
+        reviewRows.sort((a, b) => a.user.localeCompare(b.user));
+
+        // Group by user for summary rows
+        function groupRows(rows, keys) {
+          const byUser = new Map();
+          for (const r of rows) {
+            const entry = byUser.get(r.user) || { months: [], totals: {} };
+            entry.months.push(r);
+            keys.forEach(k => {
+              entry.totals[k] = (entry.totals[k] || 0) + (parseFloat(r[k]) || 0);
+            });
+            byUser.set(r.user, entry);
+          }
+          return byUser;
+        }
+
+        // PR Table
+        const prByUser = groupRows(prRows, ["count", "merged"]);
+        for (const [user, entry] of prByUser.entries()) {
+          // Only show if at least one total is non-zero
+          if ((entry.totals.count || entry.totals.merged)) {
+            // Summary row
+            // Calculate average merge time for all merged PRs for this user
+            let totalMergeTime = 0;
+            let mergedCount = 0;
+            entry.months.forEach(m => {
+              if (Array.isArray(m.mergedList)) {
+                m.mergedList.forEach(pr => {
+                  if (pr.created_at && pr.merged_at) {
+                    const created = new Date(pr.created_at);
+                    const merged = new Date(pr.merged_at);
+                    totalMergeTime += (merged - created) / 3600000; // hours
+                    mergedCount++;
+                  }
+                });
+              }
+            });
+            const avgMergeTimeAll = mergedCount > 0 ? (totalMergeTime / mergedCount).toFixed(2) : "0.00";
+            const tr = document.createElement("tr");
+            tr.className = "summary-row cursor-pointer bg-gray-50 hover:bg-gray-100";
+            tr.dataset.user = user;
+            tr.innerHTML = `
+              <td class="p-3 border font-medium">
+                <span class="mr-2 inline-block">
+                  <svg data-icon class="w-3 h-3 inline-block align-middle transition-transform" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+                  </svg>
+                </span>${user}
+              </td>
+              <td class="p-3 border text-gray-500">All</td>
+              <td class="p-3 border font-semibold pr-cell" data-type="count" data-user="${user}" data-month="all" style="cursor:pointer">${entry.totals.count}</td>
+              <td class="p-3 border font-semibold pr-cell" data-type="merged" data-user="${user}" data-month="all" style="cursor:pointer">${entry.totals.merged}</td>
+              <td class="p-3 border font-semibold">${avgMergeTimeAll}</td>
+            `;
+            prTableBody.appendChild(tr);
+
+            // Detail rows (per month)
+            const monthsSorted = entry.months.sort((a, b) => a.month.localeCompare(b.month));
+            for (const m of monthsSorted) {
+              // Calculate avgMergeTime for merged PRs in this month
+              let totalMergeTimeMonth = 0;
+              let mergedCountMonth = 0;
+              if (Array.isArray(m.mergedList)) {
+                m.mergedList.forEach(pr => {
+                  if (pr.created_at && pr.merged_at) {
+                    const created = new Date(pr.created_at);
+                    const merged = new Date(pr.merged_at);
+                    totalMergeTimeMonth += (merged - created) / 3600000; // hours
+                    mergedCountMonth++;
+                  }
+                });
+              }
+              const avgMergeTimeMonth = mergedCountMonth > 0 ? (totalMergeTimeMonth / mergedCountMonth).toFixed(2) : "0.00";
+              const dtr = document.createElement("tr");
+              dtr.className = "detail-row hidden";
+              dtr.dataset.parent = user;
+              dtr.innerHTML = `
+                <td class="p-3 border pl-8 text-gray-500"></td>
+                <td class="p-3 border">${m.month}</td>
+                <td class="p-3 border pr-cell" data-type="count" data-user="${user}" data-month="${m.month}" style="cursor:pointer">${m.count}</td>
+                <td class="p-3 border pr-cell" data-type="merged" data-user="${user}" data-month="${m.month}" style="cursor:pointer">${m.merged}</td>
+                <td class="p-3 border">${avgMergeTimeMonth}</td>
+              `;
+              prTableBody.appendChild(dtr);
+            }
+          }
+        }
+
+        // Peer Review Table
+        const reviewByUser = groupRows(reviewRows, ["reviewed", "avgCommentsPerReview", "avgReviewTime"]);
+        for (const [user, entry] of reviewByUser.entries()) {
+          // Only show if at least one total is non-zero
+          if ((entry.totals.reviewed || entry.totals.avgCommentsPerReview || entry.totals.avgReviewTime)) {
+            // Summary row with SVG chevron
+            const avgComments = entry.totals.reviewed > 0 ? (entry.totals.avgCommentsPerReview / entry.months.length).toFixed(2) : "0.00";
+            const avgReviewTime = entry.totals.reviewed > 0 ? (entry.totals.avgReviewTime / entry.months.length).toFixed(2) : "0.00";
+            const tr = document.createElement("tr");
+            tr.className = "summary-row cursor-pointer bg-gray-50 hover:bg-gray-100";
+            tr.dataset.user = user;
+            tr.innerHTML = `
+              <td class="p-3 border font-medium">
+                <span class="mr-2 inline-block">
+                  <svg data-icon class="w-3 h-3 inline-block align-middle transition-transform" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+                  </svg>
+                </span>${user}
+              </td>
+              <td class="p-3 border text-gray-500">All</td>
+              <td class="p-3 border font-semibold pr-cell" data-type="reviewed" data-user="${user}" data-month="all" style="cursor:pointer">${entry.totals.reviewed}</td>
+              <td class="p-3 border font-semibold">${avgComments}</td>
+              <td class="p-3 border font-semibold">${avgReviewTime}</td>
+            `;
+            reviewTableBody.appendChild(tr);
+
+            // Detail rows (per month)
+            const monthsSorted = entry.months.sort((a, b) => a.month.localeCompare(b.month));
+            for (const m of monthsSorted) {
+              const dtr = document.createElement("tr");
+              dtr.className = "detail-row hidden";
+              dtr.dataset.parent = user;
+              dtr.innerHTML = `
+                <td class="p-3 border pl-8 text-gray-500"></td>
+                <td class="p-3 border">${m.month}</td>
+                <td class="p-3 border pr-cell" data-type="reviewed" data-user="${user}" data-month="${m.month}" style="cursor:pointer">${m.reviewed}</td>
+                <td class="p-3 border">${m.avgCommentsPerReview}</td>
+                <td class="p-3 border">${m.avgReviewTime}</td>
+              `;
+              reviewTableBody.appendChild(dtr);
+            }
+          }
+        }
+
+        // Attach click handlers for PR modal (PR table)
+        prTableBody.querySelectorAll('.pr-cell').forEach(cell => {
+          cell.onclick = function(e) {
+            // Only open modal for detail rows, not aggregate (summary) rows
+            const parentRow = cell.closest('tr');
+            if (parentRow && parentRow.classList.contains('summary-row')) return;
+            const type = cell.dataset.type;
+            const user = cell.dataset.user;
+            const month = cell.dataset.month;
+            let prArr = [];
+            let title = "";
+            let entry = prByUser.get(user);
+            if (!entry) return;
+            if (month === "all") {
+              prArr = [];
+              entry.months.forEach(m => {
+                if (type === "count") prArr = prArr.concat(m.prList);
+                else if (type === "approved") prArr = prArr.concat(m.approvedList);
+                else if (type === "merged") prArr = prArr.concat(m.mergedList);
+              });
+              title = `${type.charAt(0).toUpperCase() + type.slice(1)} PRs by ${user} (all months)`;
+            } else {
+              const monthEntry = entry.months.find(x => x.month === month);
+              if (monthEntry) {
+                if (type === "count") prArr = monthEntry.prList;
+                else if (type === "approved") prArr = monthEntry.approvedList;
+                else if (type === "merged") prArr = monthEntry.mergedList;
+                title = `${type.charAt(0).toUpperCase() + type.slice(1)} PRs by ${user} in ${month}`;
+              }
+            }
+            showPRModal(title, prArr, false);
+          };
+        });
+
+        // Attach click handlers for review modal (Review table)
+        reviewTableBody.querySelectorAll('.pr-cell[data-type="reviewed"]').forEach(cell => {
+          cell.onclick = function(e) {
+            // Only open modal for detail rows, not aggregate (summary) rows
+            const parentRow = cell.closest('tr');
+            if (parentRow && parentRow.classList.contains('summary-row')) return;
+            const user = cell.dataset.user;
+            const month = cell.dataset.month;
+            let prArr = [];
+            let title = "";
+            let entry = reviewByUser.get(user);
+            if (!entry) return;
+            if (month === "all") {
+              prArr = [];
+              entry.months.forEach(m => prArr = prArr.concat(m.reviewedList));
+              title = `PRs reviewed by ${user} (all months)`;
+            } else {
+              const monthEntry = entry.months.find(x => x.month === month);
+              if (monthEntry) {
+                prArr = monthEntry.reviewedList;
+                title = `PRs reviewed by ${user} in ${month}`;
+              }
+            }
+            showPRModal(title, prArr, true);
+          };
+        });
+
+        // Delegate click to toggle details per user (rotates the SVG chevron) for both tables
+        function bindToggle(tableBody) {
+          if (!tableBody.dataset.toggleBound) {
+            tableBody.addEventListener("click", (evt) => {
+              const row = evt.target.closest("tr.summary-row");
+              if (!row) return;
+              const user = row.dataset.user;
+              const shouldOpen = row.dataset.expanded !== "1";
+              tableBody.querySelectorAll(`tr.detail-row[data-parent="${CSS.escape(user)}"]`).forEach(r => {
+                if (shouldOpen) r.classList.remove("hidden"); else r.classList.add("hidden");
+              });
+              const icon = row.querySelector("[data-icon]");
+              if (icon) icon.style.transform = shouldOpen ? "rotate(90deg)" : "rotate(0deg)";
+              row.dataset.expanded = shouldOpen ? "1" : "0";
+            });
+            tableBody.dataset.toggleBound = "1";
+          }
+        }
+        bindToggle(prTableBody);
+        bindToggle(reviewTableBody);
+
+        // Show/hide table panels based on rows
+        if (prRows.length > 0 || reviewRows.length > 0) {
+          resultsDiv.classList.remove("hidden");
+        } else {
+          resultsDiv.classList.add("hidden");
+        }
+        if (prRows.length > 0) {
+          prTablePanel.classList.remove("hidden");
+        } else {
+          prTablePanel.classList.add("hidden");
+        }
+        if (reviewRows.length > 0) {
+          reviewTablePanel.classList.remove("hidden");
+        } else {
+          reviewTablePanel.classList.add("hidden");
+        }
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        progress.close();
+      }
+    });
+  </script>
+</body>
+</html>

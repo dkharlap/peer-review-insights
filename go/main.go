@@ -5,16 +5,12 @@ import (
 	"log"
 	"src/gitclient"
 	"src/metrics"
-	"strconv"
 	"time"
 )
 
 func main() {
 	// Parse command-line parameters
-	token, owner, repo, days := ParseFlags()
-
-	// Calculate dateFrom and dateTo based on 'days'
-	dateFrom, dateTo := CalculateDateRange(days)
+	token, owner, repo, dateFrom, dateTo := ParseFlags()
 
 	// Get the GitHub client
 	client, err := gitclient.NewGitHubClient(token)
@@ -38,45 +34,43 @@ func main() {
 }
 
 // ParseFlags handles the parsing of command-line flags
-func ParseFlags() (string, string, string, int) {
+func ParseFlags() (string, string, string, time.Time, time.Time) {
 	token := flag.String("token", "", "GitHub access token")
 	owner := flag.String("owner", "", "Repository owner (GitHub username or organization)")
 	repo := flag.String("repo", "", "Repository name")
-	daysFlag := flag.String("days", "", "Number of days ago to calculate the date range (e.g., 10)")
+	dateFromFlag := flag.String("dateFrom", "", "Start date in YYYY-MM-DD format (required)")
+	dateToFlag := flag.String("dateTo", "", "End date in YYYY-MM-DD format (optional, defaults to today)")
 
-	// Parse the flags provided by the user
 	flag.Parse()
 
-	// Ensure all required parameters are provided
-	if *token == "" || *owner == "" || *repo == "" || *daysFlag == "" {
-		log.Fatal("Error: All parameters (token, owner, repo, and days) are required")
+	if *token == "" || *owner == "" || *repo == "" || *dateFromFlag == "" {
+		log.Fatal("Error: All parameters (token, owner, repo, and dateFrom) are required")
 	}
 
-	// Convert 'days' from string to integer
-	days, err := strconv.Atoi(*daysFlag)
+	// Parse dateFrom
+	dateFrom, err := time.Parse("2006-01-02", *dateFromFlag)
 	if err != nil {
-		log.Fatalf("Error: Invalid value for 'days'. Please provide a valid integer. %v", err)
+		log.Fatalf("Error: Invalid value for 'dateFrom'. Please use YYYY-MM-DD format. %v", err)
 	}
 
-	return *token, *owner, *repo, days
+	// Parse dateTo, default to today if not specified
+	var dateTo time.Time
+	if *dateToFlag == "" {
+		now := time.Now()
+		dateTo = time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, int(time.Second-time.Nanosecond), now.Location())
+	} else {
+		dateTo, err = time.Parse("2006-01-02", *dateToFlag)
+		if err != nil {
+			log.Fatalf("Error: Invalid value for 'dateTo'. Please use YYYY-MM-DD format. %v", err)
+		}
+		// Set to end of day for dateTo
+		dateTo = time.Date(dateTo.Year(), dateTo.Month(), dateTo.Day(), 23, 59, 59, int(time.Second-time.Nanosecond), dateTo.Location())
+	}
+
+	return *token, *owner, *repo, dateFrom, dateTo
 }
 
-// CalculateDateRange calculates the date range (dateFrom and dateTo) based on 'days'
-func CalculateDateRange(days int) (time.Time, time.Time) {
-	// Get the current date and time
-	now := time.Now()
-
-	// Truncate the time to midnight (12:00 AM) for today
-	midnightNow := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-
-	// Calculate the start date (dateFrom) as 'days' ago at midnight
-	dateFrom := midnightNow.AddDate(0, 0, -days)
-
-	// Set dateTo to the end of today (23:59:59.999999)
-	dateTo := midnightNow.Add(24*time.Hour - time.Nanosecond)
-
-	return dateFrom, dateTo
-}
+// ...existing code...
 
 // logResults logs the calculated metrics
 func logResults(results map[string]*metrics.ContributorMetrics) {
