@@ -82,6 +82,7 @@
               <th class="p-3">Month</th>
               <th class="p-3">Submitted</th>
               <th class="p-3">Merged</th>
+              <th class="p-3">Updates</th>
               <th class="p-3">Avg Merge (hrs)</th>
             </tr>
           </thead>
@@ -178,7 +179,6 @@
           totals.fetchedPages++;
           progress?.setSub(repoFetchedPages, repoLastPage ?? repoFetchedPages);
           if (typeof updateOverall === "function") updateOverall();
-          updateOverall();
 
           if (data.length < 100) break;
           if (!repoLastPage) totals.totalPages += 1;
@@ -186,65 +186,6 @@
         }
       }
       return prs;
-    }
-
-    function filterPRsByDate(prs, dateFrom, dateTo) {
-      if (!dateFrom && !dateTo) return prs;
-      const from = dateFrom ? new Date(dateFrom) : null;
-      const to = dateTo ? new Date(dateTo) : null;
-      return prs.filter(pr => {
-        const created = new Date(pr.created_at);
-        if (from && created < from) return false;
-        if (to && created > to) return false;
-        return true;
-      });
-    }
-
-    // Move updateOverall inside getPRStats so totals is in scope
-    async function getPRStats(token, repos, { dateFrom, dateTo } = {}, progress) {
-      const headers = {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-      };
-      const reposArray = Array.isArray(repos)
-        ? repos
-        : String(repos).split(",").map(s => s.trim()).filter(Boolean);
-      const totals = { totalPages: 0, fetchedPages: 0, totalReviews: 0, fetchedReviews: 0 };
-      function updateOverall() {
-        const denomPages = Math.max(totals.totalPages, totals.fetchedPages);
-        const denomReviews = Math.max(totals.totalReviews, totals.fetchedReviews);
-        const done = totals.fetchedPages + totals.fetchedReviews;
-        const total = denomPages + denomReviews || 1;
-        progress?.setOverall(done, total);
-      }
-
-      progress?.setStatus("Fetching pull request lists…");
-      progress?.setSubLabel("Current repository pages");
-
-      let prs = await fetchAllPRs(token, reposArray, progress, headers, totals, updateOverall);
-      prs = filterPRsByDate(prs, dateFrom, dateTo);
-
-      progress?.setStatus("Fetching reviews…");
-      progress?.setSubLabel("Pull request reviews");
-      progress?.setDetail(`0 of ${prs.length} reviews fetched`);
-      totals.totalReviews = prs.length;
-      progress?.setSub(0, totals.totalReviews);
-      updateOverall();
-
-      // Pass updateOverall and totals to fetchPRReviewsAndComments
-      const reviewStats = await fetchPRReviewsAndComments(prs, headers, progress, totals, updateOverall);
-      const grouped = aggregateStats(prs, reviewStats.approvedSet);
-      const rows = flattenStats(
-        grouped,
-        reviewStats.logicalReviewsByUserMonth,
-        reviewStats.commentsByUserMonth,
-        reviewStats.reviewTimeByUserMonth,
-        reviewStats.prMapByUserMonth,
-        reviewStats.approvedMapByUserMonth,
-        reviewStats.mergedMapByUserMonth,
-        reviewStats.reviewedMapByUserMonth
-      );
-      return rows;
     }
 
     // Update fetchPRReviewsAndComments to accept updateOverall as argument
@@ -302,7 +243,7 @@
             commentsByUser[c.user.login].push(c);
           }
         }
-        // For each reviewer, group reviews within 10 min as one logical review
+        // For each reviewer, group reviews within 20 min as one logical review
         for (const reviewer in reviewsByUser) {
           const userReviews = reviewsByUser[reviewer].slice().sort((a, b) => new Date(a.submitted_at) - new Date(b.submitted_at));
           let logicalGroups = [];
@@ -310,7 +251,7 @@
           let lastTime = null;
           for (const review of userReviews) {
             const reviewTime = new Date(review.submitted_at);
-            if (!lastTime || (reviewTime - lastTime) > 10 * 60 * 1000) {
+            if (!lastTime || (reviewTime - lastTime) > 20 * 60 * 1000) {
               if (currentGroup.length) logicalGroups.push(currentGroup);
               currentGroup = [review];
             } else {
@@ -329,14 +270,24 @@
           reviewTimeByUserMonth[reviewer][prMonth] = reviewTimeByUserMonth[reviewer][prMonth] || 0;
           for (const group of logicalGroups) {
             // For each logical review, count comments by reviewer within the time window of the group
-            let groupStart = new Date(group[0].submitted_at);
-            let groupEnd = new Date(group[group.length - 1].submitted_at);
+            let groupStart;
+            let groupEnd;
             let commentTimes = [];
             let commentCount = 0;
+            if (group.length === 0) {
+              groupStart = null;
+              groupEnd = null;
+            } else if (group.length === 1) {
+              groupStart = new Date(group[0].submitted_at);
+              groupEnd = new Date(group[0].submitted_at);
+            } else {
+              groupStart = new Date(group[0].submitted_at);
+              groupEnd = new Date(group[group.length - 1].submitted_at);
+            }
             if (commentsByUser[reviewer]) {
               for (const c of commentsByUser[reviewer]) {
                 const cTime = new Date(c.created_at);
-                if (cTime >= groupStart && cTime <= groupEnd) {
+                if (groupStart && groupEnd && cTime >= groupStart && cTime <= groupEnd) {
                   commentCount++;
                   commentTimes.push(cTime);
                 }
@@ -351,13 +302,31 @@
             }
             commentsByUserMonth[reviewer][prMonth] += commentCount;
             // Calculate review time for this logical review
-            let reviewDurationMin = 3;
-            if (commentTimes.length > 1) {
+            let reviewDurationMin;
+            let reviewWindowStart;
+            if (commentTimes.length === 0) {
+              reviewDurationMin = 3;
+              reviewWindowStart = new Date(groupStart - 3 * 60 * 1000);
+            } else if (commentTimes.length === 1) {
+              reviewDurationMin = 5;
+              reviewWindowStart = new Date(commentTimes[0] - 5 * 60 * 1000);
+            } else {
               const minTime = Math.min(...commentTimes.map(d => d.getTime()));
               const maxTime = Math.max(...commentTimes.map(d => d.getTime()));
-              reviewDurationMin += (maxTime - minTime) / 60000;
+              reviewDurationMin = 5 + (maxTime - minTime) / 60000;
+              reviewWindowStart = new Date(minTime - 5 * 60 * 1000);
             }
             reviewTimeByUserMonth[reviewer][prMonth] += reviewDurationMin;
+            // Store reviewWindowStart and reviewDurationMin for modal display
+            if (!pr._reviewWindows) pr._reviewWindows = [];
+            pr._reviewWindows.push({
+              reviewer,
+              group,
+              reviewWindowStart,
+              reviewDurationMin,
+              groupStart,
+              groupEnd
+            });
           }
           reviewsDoneByUserMonth[reviewer] = reviewsDoneByUserMonth[reviewer] || {};
           reviewsDoneByUserMonth[reviewer][prMonth] = logicalReviewsByUserMonth[reviewer][prMonth];
@@ -410,6 +379,18 @@
       };
     }
 
+    function filterPRsByDate(prs, dateFrom, dateTo) {
+      if (!dateFrom && !dateTo) return prs;
+      const from = dateFrom ? new Date(dateFrom) : null;
+      const to = dateTo ? new Date(dateTo) : null;
+      return prs.filter(pr => {
+        const created = new Date(pr.created_at);
+        if (from && created < from) return false;
+        if (to && created > to) return false;
+        return true;
+      });
+    }
+
     function aggregateStats(prs, approvedSet) {
       const grouped = {};
       for (const pr of prs) {
@@ -439,10 +420,38 @@
       reviewedMapByUserMonth
     ) {
       const rows = [];
-      const users = Object.keys(grouped).sort();
-      for (const user of users) {
-        const months = Object.keys(grouped[user]).sort();
-        for (const m of months) {
+      
+      // Get all users from both PR submitters and reviewers
+      const allUsers = new Set([
+        ...Object.keys(grouped),
+        ...Object.keys(logicalReviewsByUserMonth)
+      ]);
+      
+      // Get all months across all users
+      const allMonths = new Set();
+      for (const user of allUsers) {
+        if (grouped[user]) {
+          Object.keys(grouped[user]).forEach(m => allMonths.add(m));
+        }
+        if (logicalReviewsByUserMonth[user]) {
+          Object.keys(logicalReviewsByUserMonth[user]).forEach(m => allMonths.add(m));
+        }
+      }
+      
+      for (const user of Array.from(allUsers).sort()) {
+        const userMonths = new Set();
+        
+        // Add months where user submitted PRs
+        if (grouped[user]) {
+          Object.keys(grouped[user]).forEach(m => userMonths.add(m));
+        }
+        
+        // Add months where user reviewed PRs
+        if (logicalReviewsByUserMonth[user]) {
+          Object.keys(logicalReviewsByUserMonth[user]).forEach(m => userMonths.add(m));
+        }
+        
+        for (const m of Array.from(userMonths).sort()) {
           // Calculate avgMergeTime for merged PRs
           const mergedList = mergedMapByUserMonth[user]?.[m] || [];
           let totalMergeTime = 0;
@@ -456,43 +465,103 @@
             }
           }
           const avgMergeTime = mergedCount > 0 ? (totalMergeTime / mergedCount).toFixed(2) : "0.00";
+          
+          // Get review statistics for this user/month
+          const logicalReviews = logicalReviewsByUserMonth[user]?.[m] || 0;
+          const comments = commentsByUserMonth[user]?.[m] || 0;
+          const totalReviewTime = reviewTimeByUserMonth[user]?.[m] || 0;
+          
           rows.push({
             user,
             month: m,
-            count: grouped[user][m].count,
-            merged: grouped[user][m].merged,
+            count: grouped[user]?.[m]?.count || 0,
+            approved: grouped[user]?.[m]?.approved || 0,
+            merged: grouped[user]?.[m]?.merged || 0,
             avgMergeTime,
             prList: prMapByUserMonth[user]?.[m] || [],
+            approvedList: approvedMapByUserMonth[user]?.[m] || [],
             mergedList,
-            // ...existing code for review columns...
+            updateCounts: mergedList.map(pr => pr._updateCount),
+            reviewed: logicalReviews,
+            avgCommentsPerReview: logicalReviews > 0 ? (comments / logicalReviews).toFixed(2) : "0.00",
+            avgReviewTime: logicalReviews > 0 ? (totalReviewTime / logicalReviews).toFixed(2) : "0.00",
+            reviewedList: reviewedMapByUserMonth[user]?.[m] || []
           });
         }
       }
-      // Add users who only reviewed PRs (did not submit any PRs)
-      for (const reviewer of Object.keys(logicalReviewsByUserMonth)) {
-        if (!grouped[reviewer]) {
-          const months = Object.keys(logicalReviewsByUserMonth[reviewer]).sort();
-          for (const m of months) {
-            const logicalReviews = logicalReviewsByUserMonth[reviewer][m] || 0;
-            const comments = commentsByUserMonth[reviewer]?.[m] || 0;
-            const totalReviewTime = reviewTimeByUserMonth[reviewer]?.[m] || 0;
-            rows.push({
-              user: reviewer,
-              month: m,
-              count: 0,
-              approved: 0,
-              merged: 0,
-              reviewed: logicalReviews,
-              avgCommentsPerReview: logicalReviews > 0 ? (comments / logicalReviews).toFixed(2) : "0.00",
-              avgReviewTime: logicalReviews > 0 ? (totalReviewTime / logicalReviews).toFixed(2) : "0.00",
-              prList: [],
-              approvedList: [],
-              mergedList: [],
-              reviewedList: reviewedMapByUserMonth[reviewer]?.[m] || []
-            });
+      
+      return rows;
+    }
+
+    // Add this helper function before getPRStats
+    async function fetchUpdateCountsForMergedPRs(prs, headers) {
+      for (const pr of prs) {
+        if (pr.merged_at && pr.commits_url) {
+          try {
+            const resp = await fetch(pr.commits_url, { headers });
+            if (resp.ok) {
+              const commits = await resp.json();
+              const created = new Date(pr.created_at);
+              const merged = new Date(pr.merged_at);
+              pr._updateCount = commits.filter(c => {
+                const cDate = new Date(c.commit.committer.date);
+                return cDate > created && cDate < merged;
+              }).length;
+            } else {
+              pr._updateCount = null;
+            }
+          } catch {
+            pr._updateCount = null;
           }
         }
       }
+    }
+
+    async function getPRStats(token, repos, { dateFrom, dateTo } = {}, progress) {
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+      };
+      const reposArray = Array.isArray(repos)
+        ? repos
+        : String(repos).split(",").map(s => s.trim()).filter(Boolean);
+      const totals = { totalPages: 0, fetchedPages: 0, totalReviews: 0, fetchedReviews: 0 };
+      function updateOverall() {
+        const denomPages = Math.max(totals.totalPages, totals.fetchedPages);
+        const denomReviews = Math.max(totals.totalReviews, totals.fetchedReviews);
+        const done = totals.fetchedPages + totals.fetchedReviews;
+        const total = denomPages + denomReviews || 1;
+        progress?.setOverall(done, total);
+      }
+
+      progress?.setStatus("Fetching pull request lists…");
+      progress?.setSubLabel("Current repository pages");
+
+      let prs = await fetchAllPRs(token, reposArray, progress, headers, totals, updateOverall);
+      prs = filterPRsByDate(prs, dateFrom, dateTo);
+
+      progress?.setStatus("Fetching reviews…");
+      progress?.setSubLabel("Pull request reviews");
+      progress?.setDetail(`0 of ${prs.length} reviews fetched`);
+      totals.totalReviews = prs.length;
+      progress?.setSub(0, totals.totalReviews);
+      updateOverall();
+
+      // Pass updateOverall and totals to fetchPRReviewsAndComments
+      const reviewStats = await fetchPRReviewsAndComments(prs, headers, progress, totals, updateOverall);
+      // Fetch update counts for merged PRs
+      await fetchUpdateCountsForMergedPRs(prs, headers);
+      const grouped = aggregateStats(prs, reviewStats.approvedSet);
+      const rows = flattenStats(
+        grouped,
+        reviewStats.logicalReviewsByUserMonth,
+        reviewStats.commentsByUserMonth,
+        reviewStats.reviewTimeByUserMonth,
+        reviewStats.prMapByUserMonth,
+        reviewStats.approvedMapByUserMonth,
+        reviewStats.mergedMapByUserMonth,
+        reviewStats.reviewedMapByUserMonth
+      );
       return rows;
     }
 
@@ -528,6 +597,8 @@
 
       // Pass updateOverall and totals to fetchPRReviewsAndComments
       const reviewStats = await fetchPRReviewsAndComments(prs, headers, progress, totals, updateOverall);
+      // Fetch update counts for merged PRs
+      await fetchUpdateCountsForMergedPRs(prs, headers);
       const grouped = aggregateStats(prs, reviewStats.approvedSet);
       const rows = flattenStats(
         grouped,
@@ -643,45 +714,147 @@
       modalContent.innerHTML = "";
       if (!prArr || prArr.length === 0) {
         modalContent.innerHTML = "<div class='text-gray-500'>No pull requests found.</div>";
-      } else {
+      } else if (isReviewList) {
+        // Use logical review windows if present
+        let windows = [];
         prArr.forEach(item => {
-          let pr, review;
-          if (isReviewList) {
-            pr = item.pr;
-            review = item.review;
-          } else {
-            pr = item;
+          const pr = item.pr;
+          const reviewer = item.review.user?.login || "unknown";
+          if (pr._reviewWindows) {
+            pr._reviewWindows.forEach(w => {
+              if (w.reviewer === reviewer) {
+                windows.push({ pr, ...w });
+              }
+            });
           }
+        });
+        // Remove duplicates
+        windows = windows.filter((w, i, arr) =>
+          arr.findIndex(x =>
+            x.pr._repo === w.pr._repo &&
+            x.pr.number === w.pr.number &&
+            x.reviewer === w.reviewer &&
+            x.reviewWindowStart.getTime() === w.reviewWindowStart.getTime()
+          ) === i
+        );
+        // Sort by PR, reviewer, window start
+        windows.sort((a, b) => {
+          if (a.pr._repo !== b.pr._repo) return a.pr._repo.localeCompare(b.pr._repo);
+          if (a.pr.number !== b.pr.number) return a.pr.number - b.pr.number;
+          if (a.reviewer !== b.reviewer) return a.reviewer.localeCompare(b.reviewer);
+          return a.reviewWindowStart - b.reviewWindowStart;
+        });
+        // Render each logical review window
+        windows.forEach(w => {
+          renderReviewGroup(
+            w.group.map(r => ({
+              pr: w.pr,
+              reviewer: w.reviewer,
+              review: r,
+              reviewTime: new Date(r.submitted_at)
+            })),
+            modalContent,
+            w.reviewWindowStart,
+            w.reviewDurationMin
+          );
+        });
+      } else {
+        // PR list
+        prArr.forEach(pr => {
           const prUrl = pr.html_url;
           const prTitle = pr.title || prUrl;
           const prNum = pr.number;
           const repo = pr._repo;
-          let extra = "";
-          if (isReviewList && review) {
-            extra = `<span class="ml-2 text-xs text-gray-500">Review: ${review.state}</span>`;
-          }
+          const updates = pr._updateCount != null ? pr._updateCount : "?";
           modalContent.innerHTML += `
             <div>
               <a href="${prUrl}" target="_blank" class="text-blue-700 underline font-medium">${repo}#${prNum}: ${prTitle}</a>
-              ${extra}
+              <span class="ml-2 text-xs text-gray-500">Updates: ${updates}</span>
             </div>
           `;
         });
       }
       modal.classList.remove("hidden");
       modal.classList.add("flex");
+      modal.onclick = function(e) {
+        if (e.target === modal) {
+          modal.classList.add("hidden");
+          modal.classList.remove("flex");
+        }
+      };
+      document.getElementById("prModalClose").onclick = function(e) {
+        modal.classList.add("hidden");
+        modal.classList.remove("flex");
+        e.stopPropagation();
+      };
     }
-    document.getElementById("prModalClose").onclick = function() {
-      const modal = document.getElementById("prModal");
-      modal.classList.add("hidden");
-      modal.classList.remove("flex");
-    };
-    document.getElementById("prModal").onclick = function(e) {
-      if (e.target === this) {
-        this.classList.add("hidden");
-        this.classList.remove("flex");
+
+    // Helper to render a logical review group in the modal
+    function renderReviewGroup(group, modalContent, reviewWindowStart, reviewDurationMin) {
+      if (!group.length) return;
+      const pr = group[0].pr;
+      const reviewer = group[0].reviewer;
+      const prUrl = pr.html_url;
+      const prTitle = pr.title || prUrl;
+      const prNum = pr.number;
+      const repo = pr._repo;
+      // Show PR link, reviewer, and time window
+      const times = group.map(g => g.reviewTime).sort((a, b) => a - b);
+      const start = times[0];
+      const end = times[times.length - 1];
+      const timeFmt = t => t.toLocaleString();
+      let actionsHtml = "";
+      group.forEach(g => {
+        actionsHtml += `
+          <div class="ml-4 text-sm text-gray-700">
+            <span class="font-semibold">${g.review.state}</span>
+            <span class="ml-2">${timeFmt(g.reviewTime)}</span>
+            ${g.review.body ? `<div class="ml-6 text-gray-500">${g.review.body}</div>` : ""}
+          </div>
+        `;
+      });
+      modalContent.innerHTML += `
+        <div class="mb-2 p-2 rounded bg-gray-50 border border-gray-200">
+          <div>
+            <a href="${prUrl}" target="_blank" class="text-blue-700 underline font-medium">${repo}#${prNum}: ${prTitle}</a>
+            <br/>
+            <span class="ml-2 text-xs text-gray-500">Reviewer: ${reviewer}</span>
+            <span class="ml-2 text-xs text-gray-500">Review window start: ${timeFmt(reviewWindowStart)} (${reviewDurationMin.toFixed(2)} min)</span>
+          </div>
+          ${actionsHtml}
+        </div>
+      `;
+    }
+
+    // Add this helper function before its first usage (above the PR/Review table rendering code)
+    function renderUserCell(userObj) {
+      if (!userObj) return "";
+      return `<span class="font-semibold">${userObj.login}</span>`;
+    }
+
+    async function getAllPrivateRepos(token, progress) {
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+      };
+      let repos = [];
+      let page = 1;
+      while (true) {
+        const url = new URL("https://api.github.com/user/repos");
+        url.searchParams.set("visibility", "private");
+        url.searchParams.set("per_page", "100");
+        url.searchParams.set("page", page);
+        const resp = await fetch(url, { headers });
+        progress?.incApiUsage(resp);
+        if (!resp.ok) throw new Error(`GitHub API error (repos): ${resp.status} ${resp.statusText}`);
+        const data = await resp.json();
+        repos = repos.concat(data);
+        if (data.length < 100) break;
+        page++;
       }
-    };
+      // Return as ["owner/repo", ...]
+      return repos.map(r => r.full_name);
+    }
 
     // Handle form
     document.getElementById("prForm").addEventListener("submit", async (e) => {
@@ -733,6 +906,14 @@
 
         const stats = await getPRStats(token, repos, { dateFrom, dateTo }, progress);
 
+        // Get table body elements
+        const prTableBody = document.getElementById("prTableBody");
+        const reviewTableBody = document.getElementById("reviewTableBody");
+        
+        // Clear existing content
+        prTableBody.innerHTML = "";
+        reviewTableBody.innerHTML = "";
+
         // Split stats into PR rows and Review rows
         const prRows = [];
         const reviewRows = [];
@@ -781,36 +962,53 @@
           // Only show if at least one total is non-zero
           if ((entry.totals.count || entry.totals.merged)) {
             // Summary row
-            // Calculate average merge time for all merged PRs for this user
-            let totalMergeTime = 0;
-            let mergedCount = 0;
+            // Calculate total updates and average merge time correctly
+            const totalUpdatesAll = entry.months.reduce((sum, m) => {
+              if (Array.isArray(m.mergedList)) {
+                return sum + m.mergedList.reduce((s, pr) => s + (pr._updateCount ?? 0), 0);
+              }
+              return sum;
+            }, 0);
+
+            let totalMergeTimeAll = 0;
+            let mergedCountAll = 0;
             entry.months.forEach(m => {
               if (Array.isArray(m.mergedList)) {
                 m.mergedList.forEach(pr => {
                   if (pr.created_at && pr.merged_at) {
                     const created = new Date(pr.created_at);
                     const merged = new Date(pr.merged_at);
-                    totalMergeTime += (merged - created) / 3600000; // hours
-                    mergedCount++;
+                    totalMergeTimeAll += (merged - created) / 3600000;
+                    mergedCountAll++;
                   }
                 });
               }
             });
-            const avgMergeTimeAll = mergedCount > 0 ? (totalMergeTime / mergedCount).toFixed(2) : "0.00";
+            const avgMergeTimeAll = mergedCountAll > 0 ? (totalMergeTimeAll / mergedCountAll).toFixed(2) : "0.00";
             const tr = document.createElement("tr");
             tr.className = "summary-row cursor-pointer bg-gray-50 hover:bg-gray-100";
             tr.dataset.user = user;
             tr.innerHTML = `
-              <td class="p-3 border font-medium">
+              <td class="p-3 border font-medium flex items-center">
                 <span class="mr-2 inline-block">
                   <svg data-icon class="w-3 h-3 inline-block align-middle transition-transform" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                     <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
                   </svg>
-                </span>${user}
+                </span>
+                ${
+                  (() => {
+                    const userObj = entry.months[0]?.prList?.[0]?.user || { login: user };
+                    const avatar = userObj.avatar_url
+                      ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">`
+                      : "";
+                    return `${avatar}${renderUserCell(userObj)}`;
+                  })()
+                }
               </td>
               <td class="p-3 border text-gray-500">All</td>
               <td class="p-3 border font-semibold pr-cell" data-type="count" data-user="${user}" data-month="all" style="cursor:pointer">${entry.totals.count}</td>
               <td class="p-3 border font-semibold pr-cell" data-type="merged" data-user="${user}" data-month="all" style="cursor:pointer">${entry.totals.merged}</td>
+              <td class="p-3 border font-semibold">${totalUpdatesAll}</td>
               <td class="p-3 border font-semibold">${avgMergeTimeAll}</td>
             `;
             prTableBody.appendChild(tr);
@@ -818,17 +1016,19 @@
             // Detail rows (per month)
             const monthsSorted = entry.months.sort((a, b) => a.month.localeCompare(b.month));
             for (const m of monthsSorted) {
-              // Calculate avgMergeTime for merged PRs in this month
+              // Calculate updates and average merge time for the month
               let totalMergeTimeMonth = 0;
               let mergedCountMonth = 0;
+              let totalUpdatesMonth = 0;
               if (Array.isArray(m.mergedList)) {
                 m.mergedList.forEach(pr => {
                   if (pr.created_at && pr.merged_at) {
                     const created = new Date(pr.created_at);
                     const merged = new Date(pr.merged_at);
-                    totalMergeTimeMonth += (merged - created) / 3600000; // hours
+                    totalMergeTimeMonth += (merged - created) / 3600000;
                     mergedCountMonth++;
                   }
+                  totalUpdatesMonth += pr._updateCount ?? 0;
                 });
               }
               const avgMergeTimeMonth = mergedCountMonth > 0 ? (totalMergeTimeMonth / mergedCountMonth).toFixed(2) : "0.00";
@@ -840,6 +1040,7 @@
                 <td class="p-3 border">${m.month}</td>
                 <td class="p-3 border pr-cell" data-type="count" data-user="${user}" data-month="${m.month}" style="cursor:pointer">${m.count}</td>
                 <td class="p-3 border pr-cell" data-type="merged" data-user="${user}" data-month="${m.month}" style="cursor:pointer">${m.merged}</td>
+                <td class="p-3 border">${totalUpdatesMonth}</td>
                 <td class="p-3 border">${avgMergeTimeMonth}</td>
               `;
               prTableBody.appendChild(dtr);
@@ -859,12 +1060,21 @@
             tr.className = "summary-row cursor-pointer bg-gray-50 hover:bg-gray-100";
             tr.dataset.user = user;
             tr.innerHTML = `
-              <td class="p-3 border font-medium">
+              <td class="p-3 border font-medium flex items-center">
                 <span class="mr-2 inline-block">
                   <svg data-icon class="w-3 h-3 inline-block align-middle transition-transform" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                     <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
                   </svg>
-                </span>${user}
+                </span>
+                ${
+                  (() => {
+                    const userObj = entry.months[0]?.reviewedList?.[0]?.review?.user || { login: user };
+                    const avatar = userObj.avatar_url
+                      ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">`
+                      : "";
+                    return `${avatar}${renderUserCell(userObj)}`;
+                  })()
+                }
               </td>
               <td class="p-3 border text-gray-500">All</td>
               <td class="p-3 border font-semibold pr-cell" data-type="reviewed" data-user="${user}" data-month="all" style="cursor:pointer">${entry.totals.reviewed}</td>
