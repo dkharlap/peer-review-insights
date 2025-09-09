@@ -100,6 +100,7 @@
               <th class="p-3">Reviewed</th>
               <th class="p-3">Avg Comments</th>
               <th class="p-3">Avg Review (min)</th>
+              <th class="p-3">Avg Actioned Comments</th>
             </tr>
           </thead>
           <tbody id="reviewTableBody"></tbody>
@@ -199,184 +200,149 @@
       const approvedMapByUserMonth = {};
       const mergedMapByUserMonth = {};
       const reviewedMapByUserMonth = {};
+      const actionedCommentsByUserMonth = {}; // NEW
 
       for (let idx = 0; idx < prs.length; idx++) {
         const pr = prs[idx];
         // Fetch reviews
-        const reviewsResp = await fetch(
-          `https://api.github.com/repos/${pr._repo}/pulls/${pr.number}/reviews`,
-          { headers }
-        );
+        const reviewsResp = await fetch(`https://api.github.com/repos/${pr._repo}/pulls/${pr.number}/reviews`, { headers });
         progress?.incApiUsage(reviewsResp);
         let reviews = [];
         if (reviewsResp.ok) {
           reviews = await reviewsResp.json();
           pr._reviews = reviews;
         }
-        // Fetch review comments for this PR
-        const commentsResp = await fetch(
-          `https://api.github.com/repos/${pr._repo}/pulls/${pr.number}/comments`,
-          { headers }
-        );
+        // Fetch review comments
+        const commentsResp = await fetch(`https://api.github.com/repos/${pr._repo}/pulls/${pr.number}/comments`, { headers });
         progress?.incApiUsage(commentsResp);
         let reviewComments = [];
-        if (commentsResp.ok) {
-          reviewComments = await commentsResp.json();
+        if (commentsResp.ok) reviewComments = await commentsResp.json();
+
+        // Build changed line set (final merged state) for actioned detection
+        let changedLines = new Set();
+        if (pr.merged_at) {
+          try {
+            const filesResp = await fetch(pr.url + "/files", { headers });
+            progress?.incApiUsage(filesResp);
+            if (filesResp.ok) {
+              const files = await filesResp.json();
+              for (const file of files) {
+                if (!file.patch) continue;
+                const lines = file.patch.split("\n");
+                let newLine = 0;
+                for (const line of lines) {
+                  if (line.startsWith("@@")) {
+                    const m = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+                    if (m) newLine = parseInt(m[1], 10) - 1;
+                  } else if (line.startsWith("+")) {
+                    changedLines.add(newLine);
+                    newLine++;
+                  } else if (line.startsWith("-")) {
+                    // deletion does not increment newLine
+                  } else {
+                    newLine++;
+                  }
+                }
+              }
+            }
+          } catch {}
         }
-        if (reviews.some(r => r.state === "APPROVED")) {
-          approvedSet.add(`${pr._repo}#${pr.number}`);
-        }
+
+        if (reviews.some(r => r.state === "APPROVED")) approvedSet.add(`${pr._repo}#${pr.number}`);
         const prMonth = pr.created_at.slice(0, 7);
+
         // Group reviews by user
         const reviewsByUser = {};
         for (const r of reviews) {
           if (r.user?.login && r.user.login !== pr.user?.login) {
-            if (!reviewsByUser[r.user.login]) reviewsByUser[r.user.login] = [];
-            reviewsByUser[r.user.login].push(r);
+            (reviewsByUser[r.user.login] = reviewsByUser[r.user.login] || []).push(r);
           }
         }
-        // Group review comments by user and time
+        // Group comments by user
         const commentsByUser = {};
         for (const c of reviewComments) {
-          if (c.user?.login) {
-            if (!commentsByUser[c.user.login]) commentsByUser[c.user.login] = [];
-            commentsByUser[c.user.login].push(c);
-          }
+          if (c.user?.login) (commentsByUser[c.user.login] = commentsByUser[c.user.login] || []).push(c);
         }
-        // For each reviewer, group reviews within 20 min as one logical review
+
+        // Build logical review groups per reviewer
         for (const reviewer in reviewsByUser) {
-          const userReviews = reviewsByUser[reviewer].slice().sort((a, b) => new Date(a.submitted_at) - new Date(b.submitted_at));
-          let logicalGroups = [];
-          let currentGroup = [];
-          let lastTime = null;
-          for (const review of userReviews) {
-            const reviewTime = new Date(review.submitted_at);
-            if (!lastTime || (reviewTime - lastTime) > 20 * 60 * 1000) {
-              if (currentGroup.length) logicalGroups.push(currentGroup);
-              currentGroup = [review];
-            } else {
-              currentGroup.push(review);
-            }
-            lastTime = reviewTime;
+          const userReviews = reviewsByUser[reviewer].slice().sort((a,b) => new Date(a.submitted_at) - new Date(b.submitted_at));
+          let groups = []; let group = []; let lastTime = null;
+          for (const rev of userReviews) {
+            const t = new Date(rev.submitted_at);
+            if (!lastTime || (t - lastTime) > 20 * 60 * 1000) { if (group.length) groups.push(group); group = [rev]; } else group.push(rev); lastTime = t;
           }
-          if (currentGroup.length) logicalGroups.push(currentGroup);
-          // Count logical reviews
-          logicalReviewsByUserMonth[reviewer] = logicalReviewsByUserMonth[reviewer] || {};
-          logicalReviewsByUserMonth[reviewer][prMonth] = (logicalReviewsByUserMonth[reviewer][prMonth] || 0) + logicalGroups.length;
-          // Count comments for logical reviews
-          commentsByUserMonth[reviewer] = commentsByUserMonth[reviewer] || {};
+          if (group.length) groups.push(group);
+
+          logicalReviewsByUserMonth[reviewer] = logicalReviewsByUserMonth[reviewer] || {}; 
+          commentsByUserMonth[reviewer] = commentsByUserMonth[reviewer] || {}; 
+          reviewTimeByUserMonth[reviewer] = reviewTimeByUserMonth[reviewer] || {}; 
+          actionedCommentsByUserMonth[reviewer] = actionedCommentsByUserMonth[reviewer] || {}; 
+          logicalReviewsByUserMonth[reviewer][prMonth] = (logicalReviewsByUserMonth[reviewer][prMonth] || 0) + groups.length;
           commentsByUserMonth[reviewer][prMonth] = commentsByUserMonth[reviewer][prMonth] || 0;
-          reviewTimeByUserMonth[reviewer] = reviewTimeByUserMonth[reviewer] || {};
           reviewTimeByUserMonth[reviewer][prMonth] = reviewTimeByUserMonth[reviewer][prMonth] || 0;
-          for (const group of logicalGroups) {
-            // For each logical review, count comments by reviewer within the time window of the group
-            let groupStart;
-            let groupEnd;
-            let commentTimes = [];
-            let commentCount = 0;
-            if (group.length === 0) {
-              groupStart = null;
-              groupEnd = null;
-            } else if (group.length === 1) {
-              groupStart = new Date(group[0].submitted_at);
-              groupEnd = new Date(group[0].submitted_at);
-            } else {
-              groupStart = new Date(group[0].submitted_at);
-              groupEnd = new Date(group[group.length - 1].submitted_at);
-            }
+          actionedCommentsByUserMonth[reviewer][prMonth] = actionedCommentsByUserMonth[reviewer][prMonth] || 0;
+
+          for (const g of groups) {
+            let commentTimes = []; let commentCount = 0; let actionedCount = 0;
+            let windowStart, windowEnd;
+            if (g.length === 1) { windowStart = windowEnd = new Date(g[0].submitted_at); }
+            else { windowStart = new Date(g[0].submitted_at); windowEnd = new Date(g[g.length-1].submitted_at); }
+
             if (commentsByUser[reviewer]) {
               for (const c of commentsByUser[reviewer]) {
-                const cTime = new Date(c.created_at);
-                if (groupStart && groupEnd && cTime >= groupStart && cTime <= groupEnd) {
-                  commentCount++;
-                  commentTimes.push(cTime);
+                const ct = new Date(c.created_at);
+                if (windowStart && windowEnd && ct >= windowStart && ct <= windowEnd) {
+                  commentCount++; commentTimes.push(ct);
+                  if (pr.merged_at && c.position != null && changedLines.size) {
+                    // check +/- 10 lines around comment position
+                    for (let ln = c.position - 10; ln <= c.position + 10; ln++) {
+                      if (changedLines.has(ln)) { actionedCount++; break; }
+                    }
+                  }
                 }
               }
             }
-            // Also count review bodies (if present)
-            for (const review of group) {
-              if (review.body && review.body.trim()) {
-                commentCount++;
-                commentTimes.push(new Date(review.submitted_at));
-              }
-            }
+            for (const rv of g) { if (rv.body && rv.body.trim()) { commentCount++; commentTimes.push(new Date(rv.submitted_at)); } }
             commentsByUserMonth[reviewer][prMonth] += commentCount;
-            // Calculate review time for this logical review
-            let reviewDurationMin;
-            let reviewWindowStart;
-            if (commentTimes.length === 0) {
-              reviewDurationMin = 3;
-              reviewWindowStart = new Date(groupStart - 3 * 60 * 1000);
-            } else if (commentTimes.length === 1) {
-              reviewDurationMin = 5;
-              reviewWindowStart = new Date(commentTimes[0] - 5 * 60 * 1000);
-            } else {
-              const minTime = Math.min(...commentTimes.map(d => d.getTime()));
-              const maxTime = Math.max(...commentTimes.map(d => d.getTime()));
-              reviewDurationMin = 5 + (maxTime - minTime) / 60000;
-              reviewWindowStart = new Date(minTime - 5 * 60 * 1000);
-            }
-            reviewTimeByUserMonth[reviewer][prMonth] += reviewDurationMin;
-            // Store reviewWindowStart and reviewDurationMin for modal display
-            if (!pr._reviewWindows) pr._reviewWindows = [];
-            pr._reviewWindows.push({
-              reviewer,
-              group,
-              reviewWindowStart,
-              reviewDurationMin,
-              groupStart,
-              groupEnd
-            });
+            actionedCommentsByUserMonth[reviewer][prMonth] += actionedCount;
+
+            let durationMin; let reviewWindowStart;
+            if (commentTimes.length === 0) { durationMin = 3; reviewWindowStart = new Date(windowStart - 3*60000); }
+            else if (commentTimes.length === 1) { durationMin = 5; reviewWindowStart = new Date(commentTimes[0] - 5*60000); }
+            else { const minT = Math.min(...commentTimes.map(d=>d.getTime())); const maxT = Math.max(...commentTimes.map(d=>d.getTime())); durationMin = 5 + (maxT - minT)/60000; reviewWindowStart = new Date(minT - 5*60000); }
+            reviewTimeByUserMonth[reviewer][prMonth] += durationMin;
+            (pr._reviewWindows = pr._reviewWindows || []).push({ reviewer, group: g, reviewWindowStart, reviewDurationMin: durationMin, groupStart: windowStart, groupEnd: windowEnd });
           }
-          reviewsDoneByUserMonth[reviewer] = reviewsDoneByUserMonth[reviewer] || {};
+          reviewsDoneByUserMonth[reviewer] = reviewsDoneByUserMonth[reviewer] || {}; 
           reviewsDoneByUserMonth[reviewer][prMonth] = logicalReviewsByUserMonth[reviewer][prMonth];
         }
-        // Map PRs for submitter
-        const user = pr.user?.login || "unknown";
-        prMapByUserMonth[user] = prMapByUserMonth[user] || {};
-        prMapByUserMonth[user][prMonth] = prMapByUserMonth[user][prMonth] || [];
-        prMapByUserMonth[user][prMonth].push(pr);
 
-        // Approved PRs
+        // Submitter mappings
+        const submitter = pr.user?.login || "unknown";
+        (prMapByUserMonth[submitter] = prMapByUserMonth[submitter] || {});
+        (prMapByUserMonth[submitter][prMonth] = prMapByUserMonth[submitter][prMonth] || []).push(pr);
         if (reviews.some(r => r.state === "APPROVED")) {
-          approvedMapByUserMonth[user] = approvedMapByUserMonth[user] || {};
-          approvedMapByUserMonth[user][prMonth] = approvedMapByUserMonth[user][prMonth] || [];
-          approvedMapByUserMonth[user][prMonth].push(pr);
+          (approvedMapByUserMonth[submitter] = approvedMapByUserMonth[submitter] || {});
+          (approvedMapByUserMonth[submitter][prMonth] = approvedMapByUserMonth[submitter][prMonth] || []).push(pr);
         }
-        // Merged PRs
         if (pr.merged_at) {
-          mergedMapByUserMonth[user] = mergedMapByUserMonth[user] || {};
-          mergedMapByUserMonth[user][prMonth] = mergedMapByUserMonth[user][prMonth] || [];
-          mergedMapByUserMonth[user][prMonth].push(pr);
+          (mergedMapByUserMonth[submitter] = mergedMapByUserMonth[submitter] || {});
+          (mergedMapByUserMonth[submitter][prMonth] = mergedMapByUserMonth[submitter][prMonth] || []).push(pr);
         }
-        // Reviews done by other users
         for (const r of reviews) {
-          if (r.user?.login && r.user.login !== user) {
-            reviewedMapByUserMonth[r.user.login] = reviewedMapByUserMonth[r.user.login] || {};
-            reviewedMapByUserMonth[r.user.login][prMonth] = reviewedMapByUserMonth[r.user.login][prMonth] || [];
-            reviewedMapByUserMonth[r.user.login][prMonth].push({
-              pr,
-              review: r
-            });
+          if (r.user?.login && r.user.login !== submitter) {
+            (reviewedMapByUserMonth[r.user.login] = reviewedMapByUserMonth[r.user.login] || {});
+            (reviewedMapByUserMonth[r.user.login][prMonth] = reviewedMapByUserMonth[r.user.login][prMonth] || []).push({ pr, review: r });
           }
         }
         totals.fetchedReviews++;
         progress?.setDetail(`${Math.min(totals.fetchedReviews, totals.totalReviews)} of ${totals.totalReviews} reviews fetched`);
         progress?.setSub(totals.fetchedReviews, totals.totalReviews);
-        if (typeof updateOverall === "function") updateOverall();
+        updateOverall?.();
       }
 
-      return {
-        approvedSet,
-        reviewsDoneByUserMonth,
-        logicalReviewsByUserMonth,
-        commentsByUserMonth,
-        reviewTimeByUserMonth,
-        prMapByUserMonth,
-        approvedMapByUserMonth,
-        mergedMapByUserMonth,
-        reviewedMapByUserMonth
-      };
+      return { approvedSet, reviewsDoneByUserMonth, logicalReviewsByUserMonth, commentsByUserMonth, reviewTimeByUserMonth, prMapByUserMonth, approvedMapByUserMonth, mergedMapByUserMonth, reviewedMapByUserMonth, actionedCommentsByUserMonth };
     }
 
     function filterPRsByDate(prs, dateFrom, dateTo) {
@@ -417,60 +383,31 @@
       prMapByUserMonth,
       approvedMapByUserMonth,
       mergedMapByUserMonth,
-      reviewedMapByUserMonth
+      reviewedMapByUserMonth,
+      actionedCommentsByUserMonth
     ) {
       const rows = [];
-      
-      // Get all users from both PR submitters and reviewers
-      const allUsers = new Set([
-        ...Object.keys(grouped),
-        ...Object.keys(logicalReviewsByUserMonth)
-      ]);
-      
-      // Get all months across all users
-      const allMonths = new Set();
-      for (const user of allUsers) {
-        if (grouped[user]) {
-          Object.keys(grouped[user]).forEach(m => allMonths.add(m));
-        }
-        if (logicalReviewsByUserMonth[user]) {
-          Object.keys(logicalReviewsByUserMonth[user]).forEach(m => allMonths.add(m));
-        }
-      }
-      
+      const allUsers = new Set([...Object.keys(grouped), ...Object.keys(logicalReviewsByUserMonth)]);
       for (const user of Array.from(allUsers).sort()) {
-        const userMonths = new Set();
-        
-        // Add months where user submitted PRs
-        if (grouped[user]) {
-          Object.keys(grouped[user]).forEach(m => userMonths.add(m));
-        }
-        
-        // Add months where user reviewed PRs
-        if (logicalReviewsByUserMonth[user]) {
-          Object.keys(logicalReviewsByUserMonth[user]).forEach(m => userMonths.add(m));
-        }
-        
-        for (const m of Array.from(userMonths).sort()) {
-          // Calculate avgMergeTime for merged PRs
+        const months = new Set([
+          ...(grouped[user] ? Object.keys(grouped[user]) : []),
+          ...(logicalReviewsByUserMonth[user] ? Object.keys(logicalReviewsByUserMonth[user]) : [])
+        ]);
+        for (const m of Array.from(months).sort()) {
           const mergedList = mergedMapByUserMonth[user]?.[m] || [];
-          let totalMergeTime = 0;
-          let mergedCount = 0;
+          let totalMergeTime = 0, mergedCount = 0;
           for (const pr of mergedList) {
             if (pr.created_at && pr.merged_at) {
-              const created = new Date(pr.created_at);
-              const merged = new Date(pr.merged_at);
-              totalMergeTime += (merged - created) / 3600000; // hours
+              totalMergeTime += (new Date(pr.merged_at) - new Date(pr.created_at)) / 3600000;
               mergedCount++;
             }
           }
-          const avgMergeTime = mergedCount > 0 ? (totalMergeTime / mergedCount).toFixed(2) : "0.00";
-          
-          // Get review statistics for this user/month
+          const avgMergeTime = mergedCount ? (totalMergeTime / mergedCount).toFixed(2) : "0.00";
           const logicalReviews = logicalReviewsByUserMonth[user]?.[m] || 0;
           const comments = commentsByUserMonth[user]?.[m] || 0;
+            const actioned = actionedCommentsByUserMonth?.[user]?.[m] || 0;
           const totalReviewTime = reviewTimeByUserMonth[user]?.[m] || 0;
-          
+          const avgActioned = logicalReviews ? (actioned / logicalReviews).toFixed(2) : "0.00";
           rows.push({
             user,
             month: m,
@@ -483,13 +420,14 @@
             mergedList,
             updateCounts: mergedList.map(pr => pr._updateCount),
             reviewed: logicalReviews,
-            avgCommentsPerReview: logicalReviews > 0 ? (comments / logicalReviews).toFixed(2) : "0.00",
-            avgReviewTime: logicalReviews > 0 ? (totalReviewTime / logicalReviews).toFixed(2) : "0.00",
-            reviewedList: reviewedMapByUserMonth[user]?.[m] || []
+            avgCommentsPerReview: logicalReviews ? (comments / logicalReviews).toFixed(2) : "0.00",
+            avgReviewTime: logicalReviews ? (totalReviewTime / logicalReviews).toFixed(2) : "0.00",
+            reviewedList: reviewedMapByUserMonth[user]?.[m] || [],
+            actionedCount: actioned,
+            avgActionedComments: avgActioned
           });
         }
       }
-      
       return rows;
     }
 
@@ -560,7 +498,8 @@
         reviewStats.prMapByUserMonth,
         reviewStats.approvedMapByUserMonth,
         reviewStats.mergedMapByUserMonth,
-        reviewStats.reviewedMapByUserMonth
+        reviewStats.reviewedMapByUserMonth,
+        reviewStats.actionedCommentsByUserMonth
       );
       return rows;
     }
@@ -608,7 +547,8 @@
         reviewStats.prMapByUserMonth,
         reviewStats.approvedMapByUserMonth,
         reviewStats.mergedMapByUserMonth,
-        reviewStats.reviewedMapByUserMonth
+        reviewStats.reviewedMapByUserMonth,
+        reviewStats.actionedCommentsByUserMonth
       );
       return rows;
     }
@@ -918,24 +858,8 @@
         const prRows = [];
         const reviewRows = [];
         for (const r of stats) {
-          prRows.push({
-            user: r.user,
-            month: r.month,
-            count: r.count,
-            approved: r.approved,
-            merged: r.merged,
-            prList: r.prList,
-            approvedList: r.approvedList,
-            mergedList: r.mergedList
-          });
-          reviewRows.push({
-            user: r.user,
-            month: r.month,
-            reviewed: r.reviewed,
-            avgCommentsPerReview: r.avgCommentsPerReview,
-            avgReviewTime: r.avgReviewTime,
-            reviewedList: r.reviewedList
-          });
+          prRows.push({ user: r.user, month: r.month, count: r.count, approved: r.approved, merged: r.merged, prList: r.prList, approvedList: r.approvedList, mergedList: r.mergedList });
+          reviewRows.push({ user: r.user, month: r.month, reviewed: r.reviewed, avgCommentsPerReview: r.avgCommentsPerReview, avgReviewTime: r.avgReviewTime, reviewedList: r.reviewedList, avgActionedComments: r.avgActionedComments, actionedCount: r.actionedCount });
         }
 
         // Sort both tables by user name ascending
@@ -1049,13 +973,17 @@
         }
 
         // Peer Review Table
-        const reviewByUser = groupRows(reviewRows, ["reviewed", "avgCommentsPerReview", "avgReviewTime"]);
+        const reviewByUser = groupRows(reviewRows, ["reviewed", "actionedCount"]);
         for (const [user, entry] of reviewByUser.entries()) {
-          // Only show if at least one total is non-zero
-          if ((entry.totals.reviewed || entry.totals.avgCommentsPerReview || entry.totals.avgReviewTime)) {
-            // Summary row with SVG chevron
-            const avgComments = entry.totals.reviewed > 0 ? (entry.totals.avgCommentsPerReview / entry.months.length).toFixed(2) : "0.00";
-            const avgReviewTime = entry.totals.reviewed > 0 ? (entry.totals.avgReviewTime / entry.months.length).toFixed(2) : "0.00";
+          if ((entry.totals.reviewed)) {
+            const totalReviewed = entry.totals.reviewed;
+            const totalActioned = entry.totals.actionedCount || 0;
+            const avgActionedOverall = totalReviewed ? (totalActioned / totalReviewed).toFixed(2) : "0.00";
+            // Use total raw values (reconstructed) instead of per-month average to account for months with 0
+            const totalComments = entry.months.reduce((s,m)=> s + (m.reviewed * parseFloat(m.avgCommentsPerReview)),0);
+            const totalReviewTime = entry.months.reduce((s,m)=> s + (m.reviewed * parseFloat(m.avgReviewTime)),0);
+            const avgComments = totalReviewed ? (totalComments / totalReviewed).toFixed(2) : "0.00";
+            const avgReviewTime = totalReviewed ? (totalReviewTime / totalReviewed).toFixed(2) : "0.00";
             const tr = document.createElement("tr");
             tr.className = "summary-row cursor-pointer bg-gray-50 hover:bg-gray-100";
             tr.dataset.user = user;
@@ -1066,25 +994,15 @@
                     <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
                   </svg>
                 </span>
-                ${
-                  (() => {
-                    const userObj = entry.months[0]?.reviewedList?.[0]?.review?.user || { login: user };
-                    const avatar = userObj.avatar_url
-                      ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">`
-                      : "";
-                    return `${avatar}${renderUserCell(userObj)}`;
-                  })()
-                }
+                ${(() => { const userObj = entry.months[0]?.reviewedList?.[0]?.review?.user || { login: user }; const avatar = userObj.avatar_url ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">` : ""; return `${avatar}${renderUserCell(userObj)}`; })()}
               </td>
               <td class="p-3 border text-gray-500">All</td>
-              <td class="p-3 border font-semibold pr-cell" data-type="reviewed" data-user="${user}" data-month="all" style="cursor:pointer">${entry.totals.reviewed}</td>
+              <td class="p-3 border font-semibold pr-cell" data-type="reviewed" data-user="${user}" data-month="all" style="cursor:pointer">${totalReviewed}</td>
               <td class="p-3 border font-semibold">${avgComments}</td>
               <td class="p-3 border font-semibold">${avgReviewTime}</td>
-            `;
+              <td class="p-3 border font-semibold">${avgActionedOverall}</td>`;
             reviewTableBody.appendChild(tr);
-
-            // Detail rows (per month)
-            const monthsSorted = entry.months.sort((a, b) => a.month.localeCompare(b.month));
+            const monthsSorted = entry.months.sort((a,b)=>a.month.localeCompare(b.month));
             for (const m of monthsSorted) {
               const dtr = document.createElement("tr");
               dtr.className = "detail-row hidden";
@@ -1095,7 +1013,7 @@
                 <td class="p-3 border pr-cell" data-type="reviewed" data-user="${user}" data-month="${m.month}" style="cursor:pointer">${m.reviewed}</td>
                 <td class="p-3 border">${m.avgCommentsPerReview}</td>
                 <td class="p-3 border">${m.avgReviewTime}</td>
-              `;
+                <td class="p-3 border">${m.avgActionedComments}</td>`;
               reviewTableBody.appendChild(dtr);
             }
           }
