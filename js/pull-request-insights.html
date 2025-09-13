@@ -83,6 +83,7 @@
               <th class="p-3">Submitted</th>
               <th class="p-3">Merged</th>
               <th class="p-3">Updates</th>
+              <th class="p-3">Lines Changed</th>
               <th class="p-3">Avg Merge (hrs)</th>
             </tr>
           </thead>
@@ -189,7 +190,6 @@
       return prs;
     }
 
-    // Update fetchPRReviewsAndComments to accept updateOverall as argument
     async function fetchPRReviewsAndComments(prs, headers, progress, totals, updateOverall) {
       const approvedSet = new Set();
       const reviewsDoneByUserMonth = {};
@@ -226,8 +226,11 @@
             progress?.incApiUsage(filesResp);
             if (filesResp.ok) {
               const files = await filesResp.json();
+              let totalChanged = 0; // only track total changed lines now
               for (const file of files) {
-                if (!file.patch) continue;
+                const fileChanges = (file.changes != null) ? file.changes : 0;
+                totalChanged += fileChanges;
+                if (!file.patch) continue; // still need patch for actioned detection
                 const lines = file.patch.split("\n");
                 let newLine = 0;
                 for (const line of lines) {
@@ -244,6 +247,7 @@
                   }
                 }
               }
+              pr._linesChanged = totalChanged;
             }
           } catch {}
         }
@@ -705,7 +709,7 @@
           const prTitle = pr.title || prUrl;
           const prNum = pr.number;
           const repo = pr._repo;
-          const updates = pr._updateCount != null ? pr._updateCount : "?";
+          const updates = pr._updateCount != null ? pr._updateCount : 0;
           modalContent.innerHTML += `
             <div>
               <a href="${prUrl}" target="_blank" class="text-blue-700 underline font-medium">${repo}#${prNum}: ${prTitle}</a>
@@ -883,26 +887,22 @@
         // PR Table
         const prByUser = groupRows(prRows, ["count", "merged"]);
         for (const [user, entry] of prByUser.entries()) {
-          // Only show if at least one total is non-zero
           if ((entry.totals.count || entry.totals.merged)) {
-            // Summary row
-            // Calculate total updates and average merge time correctly
+            // NEW: aggregate line stats across merged PRs (all months)
+            const totalLinesChangedAll = entry.months.reduce((sum, m) => sum + (Array.isArray(m.mergedList) ? m.mergedList.reduce((s, pr) => s + (pr._linesChanged || 0), 0) : 0), 0);
+            // Existing total updates & merge time logic
             const totalUpdatesAll = entry.months.reduce((sum, m) => {
               if (Array.isArray(m.mergedList)) {
                 return sum + m.mergedList.reduce((s, pr) => s + (pr._updateCount ?? 0), 0);
               }
               return sum;
             }, 0);
-
-            let totalMergeTimeAll = 0;
-            let mergedCountAll = 0;
+            let totalMergeTimeAll = 0; let mergedCountAll = 0;
             entry.months.forEach(m => {
               if (Array.isArray(m.mergedList)) {
                 m.mergedList.forEach(pr => {
                   if (pr.created_at && pr.merged_at) {
-                    const created = new Date(pr.created_at);
-                    const merged = new Date(pr.merged_at);
-                    totalMergeTimeAll += (merged - created) / 3600000;
+                    totalMergeTimeAll += (new Date(pr.merged_at) - new Date(pr.created_at)) / 3600000;
                     mergedCountAll++;
                   }
                 });
@@ -919,40 +919,27 @@
                     <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
                   </svg>
                 </span>
-                ${
-                  (() => {
-                    const userObj = entry.months[0]?.prList?.[0]?.user || { login: user };
-                    const avatar = userObj.avatar_url
-                      ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">`
-                      : "";
-                    return `${avatar}${renderUserCell(userObj)}`;
-                  })()
-                }
+                ${(() => { const userObj = entry.months[0]?.prList?.[0]?.user || { login: user }; const avatar = userObj.avatar_url ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">` : ""; return `${avatar}<span class=\"font-semibold\">${userObj.login}</span>`; })()}
               </td>
               <td class="p-3 border text-gray-500">All</td>
               <td class="p-3 border font-semibold pr-cell" data-type="count" data-user="${user}" data-month="all" style="cursor:pointer">${entry.totals.count}</td>
               <td class="p-3 border font-semibold pr-cell" data-type="merged" data-user="${user}" data-month="all" style="cursor:pointer">${entry.totals.merged}</td>
-              <td class="p-3 border font-semibold">${totalUpdatesAll}</td>
-              <td class="p-3 border font-semibold">${avgMergeTimeAll}</td>
-            `;
+              <td class="p-3 border font-semibold">${(totalUpdatesAll/entry.totals.merged).toFixed(2)}</td>
+              <td class="p-3 border font-semibold">${totalLinesChangedAll}</td>
+              <td class="p-3 border font-semibold">${avgMergeTimeAll}</td>`;
             prTableBody.appendChild(tr);
-
-            // Detail rows (per month)
+            // Detail rows
             const monthsSorted = entry.months.sort((a, b) => a.month.localeCompare(b.month));
             for (const m of monthsSorted) {
-              // Calculate updates and average merge time for the month
-              let totalMergeTimeMonth = 0;
-              let mergedCountMonth = 0;
-              let totalUpdatesMonth = 0;
+              let totalMergeTimeMonth = 0; let mergedCountMonth = 0; let totalUpdatesMonth = 0; let linesChangedMonth = 0;
               if (Array.isArray(m.mergedList)) {
                 m.mergedList.forEach(pr => {
                   if (pr.created_at && pr.merged_at) {
-                    const created = new Date(pr.created_at);
-                    const merged = new Date(pr.merged_at);
-                    totalMergeTimeMonth += (merged - created) / 3600000;
+                    totalMergeTimeMonth += (new Date(pr.merged_at) - new Date(pr.created_at)) / 3600000;
                     mergedCountMonth++;
                   }
                   totalUpdatesMonth += pr._updateCount ?? 0;
+                  linesChangedMonth += pr._linesChanged || 0;
                 });
               }
               const avgMergeTimeMonth = mergedCountMonth > 0 ? (totalMergeTimeMonth / mergedCountMonth).toFixed(2) : "0.00";
@@ -965,8 +952,8 @@
                 <td class="p-3 border pr-cell" data-type="count" data-user="${user}" data-month="${m.month}" style="cursor:pointer">${m.count}</td>
                 <td class="p-3 border pr-cell" data-type="merged" data-user="${user}" data-month="${m.month}" style="cursor:pointer">${m.merged}</td>
                 <td class="p-3 border">${totalUpdatesMonth}</td>
-                <td class="p-3 border">${avgMergeTimeMonth}</td>
-              `;
+                <td class="p-3 border">${linesChangedMonth}</td>
+                <td class="p-3 border">${avgMergeTimeMonth}</td>`;
               prTableBody.appendChild(dtr);
             }
           }
