@@ -9,36 +9,35 @@
   <!-- Remove the CDN script below for production use. -->
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    /* Reserve vertical scrollbar gutter to avoid layout shift when content grows */
+    /* Keep original table layout helpers */
     html { scrollbar-gutter: stable; }
-
-    /* Make first column flexible and others only as wide as needed */
     #results table { table-layout: auto; }
     #results table th:not(:first-child),
-    #results table td:not(:first-child) {
-      white-space: nowrap;
-      width: 1%;
-    }
+    #results table td:not(:first-child) { white-space: nowrap; width:1%; }
     #results table th:first-child,
-    #results table td:first-child {
-      width: auto;
-    }
+    #results table td:first-child { width:auto; }
     #results table th:nth-child(2),
-    #results table td:nth-child(2) {
-      min-width: 80px;
-      width: 80px;
-      max-width: 80px;
-      white-space: nowrap;
+    #results table td:nth-child(2) { min-width:80px; width:80px; max-width:80px; white-space:nowrap; }
+    /* Remove dark mode specific panel style; permanent dark backdrop if desired for overlay */
+    #progressPanel > div { background:#ffffff; color:#1f2937; }
+    /* Page background now always dark gradient */
+    body.app-dark-bg { background: radial-gradient(circle at 25% 20%, #1f2937 0%, #111827 55%, #0b0f19 100%); }
+    /* Peer review / PR modal title visibility */
+    #prModalTitle, #progressPanel .overlay-title {
+      color:#0f172a; /* deep slate for contrast on white card */
+      font-weight:600;
+      position:relative;
+      letter-spacing:.5px;
     }
   </style>
 </head>
-<body class="min-h-screen bg-gray-100 flex flex-col items-center relative overflow-y-scroll">
+<body class="app-dark-bg min-h-screen text-gray-100 flex flex-col items-center relative overflow-y-scroll">
 
   <!-- Background image -->
   <div class="fixed inset-0 pointer-events-none">
-    <img src="https://images.unsplash.com/photo-1519389950473-47ba0277781c" 
+    <img src="https://images.unsplash.com/photo-1501785888041-af3ef285b470" 
          alt="Background" 
-         class="w-full h-full object-cover opacity-20 select-none">
+         class="w-full h-full object-cover opacity-10 select-none">
   </div>
 
   <!-- Content -->
@@ -46,18 +45,19 @@
 
     <!-- Header -->
     <header class="text-center mb-6">
-      <h1 class="text-3xl font-bold text-gray-800">Pull Request Insights</h1>
-      <p class="mt-2 text-gray-700">
-        This tool analyzes GitHub pull requests and peer reviews for selected repositories and date ranges. 
+      <h1 class="text-3xl font-bold text-white">Developer Velocity</h1>
+      <p class="mt-2 text-gray-300">
+        This page analyzes GitHub pull requests and peer reviews for selected repositories and date ranges.
         It shows per-user and per-month stats including PR counts, approvals, merges, reviews, average comments, and estimated review times.
       </p>
-      <p>
-        <b>NOTE: all processing is done in your browser; no data is sent to any server.</b>
+      <p class="text-gray-400">
+        <br/>
+        <b>NOTE: no data is sent to our servers; all processing is done in your browser and GitHub.</b>
       </p>
     </header>
 
     <!-- Form -->
-    <form id="prForm" class="bg-white shadow-lg rounded p-6 md:p-8 grid gap-4 md:gap-6 w-full">
+    <form id="prForm" class="bg-white text-gray-800 shadow-lg rounded p-6 md:p-8 grid gap-4 md:gap-6 w-full">
       <input type="text" id="token" placeholder="GitHub Token" required
              class="border p-3 rounded w-full focus:ring-2 focus:ring-blue-400">
       <input type="text" id="repo" placeholder="Repositories (e.g. owner1/repo1, owner2/repo2) or leave blank for all private repos"
@@ -66,12 +66,12 @@
       <input type="date" id="dateTo" class="border p-3 rounded w-full focus:ring-2 focus:ring-blue-400">
       <button type="submit" 
               class="bg-blue-600 text-white py-3 px-6 rounded hover:bg-blue-700 transition w-full md:w-auto">
-        Get Insights
+        Get Developer Velocity
       </button>
     </form>
 
     <!-- Results -->
-    <div id="results" class="mt-8 bg-white shadow-md rounded p-4 overflow-x-auto hidden">
+    <div id="results" class="mt-8 bg-white text-gray-800 shadow-md rounded p-4 overflow-x-auto hidden">
       <!-- PR Table -->
       <div id="prTablePanel" class="mb-8 hidden">
         <h2 class="text-xl font-semibold mb-2 text-blue-900">Pull Requests</h2>
@@ -113,7 +113,7 @@
     <div id="progressPanel" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/30">
       <div class="bg-white shadow-2xl rounded p-6 w-full max-w-lg"
            style="position:absolute;left:50%;top:0;transform:translateX(-50%);margin-top:200px;">
-        <div class="text-lg font-semibold mb-2">Working…</div>
+  <div class="text-lg font-semibold mb-2 overlay-title">Working…</div>
         <div id="progressStatus" class="text-sm text-gray-700 mb-1">Preparing…</div>
         <div class="w-full bg-gray-200 rounded h-3 overflow-hidden">
           <div id="overallBar" class="h-3 bg-blue-600" style="width: 0%"></div>
@@ -138,7 +138,7 @@
     <div id="prModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40">
       <div class="bg-white shadow-2xl rounded p-6 w-full max-w-2xl">
         <div class="flex justify-between items-center mb-4">
-          <div class="text-lg font-semibold" id="prModalTitle">Related Pull Requests</div>
+          <div class="text-lg font-semibold overlay-title" id="prModalTitle">Related Pull Requests</div>
           <button id="prModalClose" class="text-gray-500 hover:text-gray-800 text-xl">&times;</button>
         </div>
         <div id="prModalContent" class="space-y-2 overflow-y-auto" style="max-height:60vh"></div>
@@ -148,6 +148,32 @@
   </div>
 
   <script>
+    // Default date logic: if empty, dateTo = today; dateFrom = first of current month if today > 15th, else first of previous month
+    document.addEventListener('DOMContentLoaded', () => {
+      const fromEl = document.getElementById('dateFrom');
+      const toEl = document.getElementById('dateTo');
+      if (fromEl && toEl && !fromEl.value && !toEl.value) {
+        const today = new Date();
+        const yyyy = today.getFullYear();
+        const mm = String(today.getMonth() + 1).padStart(2, '0');
+        const dd = String(today.getDate()).padStart(2, '0');
+        // dateTo -> today
+        toEl.value = `${yyyy}-${mm}-${dd}`;
+        // Compute dateFrom
+        let fromDate;
+        if (today.getDate() > 15) {
+          fromDate = new Date(yyyy, today.getMonth(), 1);
+        } else {
+          // previous month
+            const prevMonth = new Date(yyyy, today.getMonth() - 1, 1);
+            fromDate = prevMonth;
+        }
+        const fyyyy = fromDate.getFullYear();
+        const fmm = String(fromDate.getMonth() + 1).padStart(2, '0');
+        const fdd = '01';
+        fromEl.value = `${fyyyy}-${fmm}-${fdd}`;
+      }
+    });
     async function fetchAllPRs(token, reposArray, progress, headers, totals, updateOverall) {
       let prs = [];
 
@@ -1110,6 +1136,8 @@
         progress.close();
       }
     });
+
+  // Removed obsolete dark mode toggle script (themeToggle element not present)
   </script>
 </body>
 </html>
