@@ -99,8 +99,8 @@
               <th class="p-3">User</th>
               <th class="p-3">Month</th>
               <th class="p-3">Reviewed</th>
-              <th class="p-3">Avg Comments</th>
               <th class="p-3">Avg Review (min)</th>
+              <th class="p-3">Avg Comments</th>
               <th class="p-3">Avg Actioned Comments</th>
             </tr>
           </thead>
@@ -729,17 +729,20 @@
           );
         });
       } else {
-        // PR list
+        // PR list (we already have _linesChanged populated for merged PRs)
         prArr.forEach(pr => {
           const prUrl = pr.html_url;
           const prTitle = pr.title || prUrl;
           const prNum = pr.number;
-          const repo = pr._repo;
+            const repo = pr._repo;
           const updates = pr._updateCount != null ? pr._updateCount : 0;
+          const showLines = !!pr.merged_at && typeof pr._linesChanged === 'number';
+          const linesSpan = showLines ? `<span class=\"ml-2 text-xs text-gray-500\">Lines: ${pr._linesChanged}</span>` : '';
           modalContent.innerHTML += `
             <div>
               <a href="${prUrl}" target="_blank" class="text-blue-700 underline font-medium">${repo}#${prNum}: ${prTitle}</a>
               <span class="ml-2 text-xs text-gray-500">Updates: ${updates}</span>
+              ${linesSpan}
             </div>
           `;
         });
@@ -1011,8 +1014,8 @@
               </td>
               <td class="p-3 border text-gray-500">All</td>
               <td class="p-3 border font-semibold pr-cell" data-type="reviewed" data-user="${user}" data-month="all" style="cursor:pointer">${totalReviewed}</td>
-              <td class="p-3 border font-semibold">${avgComments}</td>
               <td class="p-3 border font-semibold">${avgReviewTime}</td>
+              <td class="p-3 border font-semibold">${avgComments}</td>
               <td class="p-3 border font-semibold">${avgActionedOverall}</td>`;
             reviewTableBody.appendChild(tr);
             const monthsSorted = entry.months.sort((a,b)=>a.month.localeCompare(b.month));
@@ -1024,8 +1027,8 @@
                 <td class="p-3 border pl-8 text-gray-500"></td>
                 <td class="p-3 border">${m.month}</td>
                 <td class="p-3 border pr-cell" data-type="reviewed" data-user="${user}" data-month="${m.month}" style="cursor:pointer">${m.reviewed}</td>
-                <td class="p-3 border">${m.avgCommentsPerReview}</td>
                 <td class="p-3 border">${m.avgReviewTime}</td>
+                <td class="p-3 border">${m.avgCommentsPerReview}</td>
                 <td class="p-3 border">${m.avgActionedComments}</td>`;
               reviewTableBody.appendChild(dtr);
             }
