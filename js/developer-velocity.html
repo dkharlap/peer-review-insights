@@ -145,12 +145,12 @@
       <div class="bg-white shadow-2xl rounded p-6 w-full max-w-lg"
         style="position:absolute;left:50%;top:0;transform:translateX(-50%);margin-top:200px;">
         <div class="text-lg font-semibold mb-2 overlay-title">Working…</div>
-        <div id="progressStatus" class="text-sm text-gray-700 mb-1">Preparing…</div>
+        <div id="progressStatus" class="text-sm text-gray-700 mb-1 hidden">Preparing…</div>
         <div class="w-full bg-gray-200 rounded h-3 overflow-hidden">
           <div id="overallBar" class="h-3 bg-blue-600" style="width: 0%"></div>
         </div>
         <div class="flex justify-between text-xs text-gray-600 mt-1">
-          <span>Overall</span>
+          <span id="overallLabel">Overall</span>
           <span id="overallPct">0%</span>
         </div>
         <div id="subLabel" class="text-sm text-gray-700 mt-4 mb-1">Subtask</div>
@@ -418,15 +418,16 @@
       });
     }
 
-    async function aggregateStats(prs, approvedSet, progress) {
+    async function aggregateStats(prs, approvedSet, progress, startPct, endPct) {
       const grouped = {};
       progress?.setStatus("Aggregating stats…");
       progress?.setSubLabel("Processing PRs");
-      progress?.setOverall(0, prs.length);
+      progress?.setOverallScaled(0, prs.length, startPct, endPct);
 
       for (let i = 0; i < prs.length; i++) {
         if (i % 100 === 0) {
           progress?.setSub(i, prs.length);
+          progress?.setOverallScaled(i, prs.length, startPct, endPct);
           await new Promise(r => setTimeout(r, 0));
         }
         const pr = prs[i];
@@ -455,7 +456,9 @@
       mergedMapByUserMonth,
       reviewedMapByUserMonth,
       actionedCommentsByUserMonth,
-      progress
+      progress,
+      startPct,
+      endPct
     ) {
       const rows = [];
       const allUsers = new Set([...Object.keys(grouped), ...Object.keys(logicalReviewsByUserMonth)]);
@@ -463,11 +466,12 @@
 
       progress?.setStatus("Flattening stats…");
       progress?.setSubLabel("Processing users");
-      progress?.setOverall(0, allUsersArray.length);
+      progress?.setOverallScaled(0, allUsersArray.length, startPct, endPct);
 
       for (let i = 0; i < allUsersArray.length; i++) {
         if (i % 20 === 0) {
           progress?.setSub(i, allUsersArray.length);
+          progress?.setOverallScaled(i, allUsersArray.length, startPct, endPct);
           await new Promise(r => setTimeout(r, 0));
         }
         const user = allUsersArray[i];
@@ -514,15 +518,16 @@
     }
 
     // Add this helper function before getPRStats
-    async function fetchUpdateCountsForMergedPRs(prs, headers, progress) {
+    async function fetchUpdateCountsForMergedPRs(prs, headers, progress, startPct, endPct) {
       progress?.setStatus("Fetching update counts…");
       progress?.setSubLabel("Checking merged PRs");
-      progress?.setOverall(0, prs.length);
+      progress?.setOverallScaled(0, prs.length, startPct, endPct);
 
       for (let i = 0; i < prs.length; i++) {
         const pr = prs[i];
         if (i % 10 === 0) {
           progress?.setSub(i, prs.length);
+          progress?.setOverallScaled(i, prs.length, startPct, endPct);
           // Yield occasionally
           await new Promise(r => setTimeout(r, 0));
         }
@@ -558,18 +563,26 @@
         ? repos
         : String(repos).split(",").map(s => s.trim()).filter(Boolean);
       const totals = { totalPages: 0, fetchedPages: 0, totalReviews: 0, fetchedReviews: 0 };
-      function updateOverall() {
+      function updatePRProgress() {
         const denomPages = Math.max(totals.totalPages, totals.fetchedPages);
+        const done = totals.fetchedPages;
+        const total = denomPages || 1;
+        // Scale PR fetching phase to 0-40%
+        progress?.setOverallScaled(done, total, 0, 40);
+      }
+
+      function updateReviewProgress() {
         const denomReviews = Math.max(totals.totalReviews, totals.fetchedReviews);
-        const done = totals.fetchedPages + totals.fetchedReviews;
-        const total = denomPages + denomReviews || 1;
-        progress?.setOverall(done, total);
+        const done = totals.fetchedReviews;
+        const total = denomReviews || 1;
+        // Scale Review fetching phase to 40-90%
+        progress?.setOverallScaled(done, total, 40, 90);
       }
 
       progress?.setStatus("Fetching pull request lists…");
       progress?.setSubLabel("Current repository pages");
 
-      let prs = await fetchAllPRs(token, reposArray, progress, headers, totals, updateOverall);
+      let prs = await fetchAllPRs(token, reposArray, progress, headers, totals, updatePRProgress);
       prs = filterPRsByDate(prs, dateFrom, dateTo);
 
       progress?.setStatus("Fetching reviews…");
@@ -577,13 +590,18 @@
       progress?.setDetail(`0 of ${prs.length} reviews fetched`);
       totals.totalReviews = prs.length;
       progress?.setSub(0, totals.totalReviews);
-      updateOverall();
+      updateReviewProgress();
 
-      // Pass updateOverall and totals to fetchPRReviewsAndComments
-      const reviewStats = await fetchPRReviewsAndComments(prs, headers, progress, totals, updateOverall);
-      // Fetch update counts for merged PRs
-      await fetchUpdateCountsForMergedPRs(prs, headers, progress);
-      const grouped = await aggregateStats(prs, reviewStats.approvedSet, progress);
+      // Pass updateReviewProgress and totals to fetchPRReviewsAndComments
+      const reviewStats = await fetchPRReviewsAndComments(prs, headers, progress, totals, updateReviewProgress);
+
+      // Fetch update counts for merged PRs (90-98%)
+      await fetchUpdateCountsForMergedPRs(prs, headers, progress, 90, 98);
+
+      // Aggregate stats (98-99%)
+      const grouped = await aggregateStats(prs, reviewStats.approvedSet, progress, 98, 99);
+
+      // Flatten stats (99-100%)
       const rows = await flattenStats(
         grouped,
         reviewStats.logicalReviewsByUserMonth,
@@ -594,7 +612,8 @@
         reviewStats.mergedMapByUserMonth,
         reviewStats.reviewedMapByUserMonth,
         reviewStats.actionedCommentsByUserMonth,
-        progress
+        progress,
+        99, 100
       );
       return rows;
     }
@@ -606,9 +625,9 @@
       const panel = document.getElementById("progressPanel");
       const overallBar = document.getElementById("overallBar");
       const overallPct = document.getElementById("overallPct");
+      const overallLabel = document.getElementById("overallLabel");
       const subBar = document.getElementById("subBar");
       const subPct = document.getElementById("subPct");
-      const statusEl = document.getElementById("progressStatus");
       const detailEl = document.getElementById("progressDetail");
       const subLabelEl = document.getElementById("subLabel");
       const apiUsageEl = document.getElementById("apiUsage");
@@ -623,7 +642,7 @@
         panel.classList.add("hidden");
         panel.classList.remove("flex");
       }
-      function setStatus(text) { statusEl.textContent = text; }
+      function setStatus(text) { overallLabel.textContent = text; }
       function setDetail(text) { detailEl.textContent = text; }
       function setSubLabel(text) { subLabelEl.textContent = text; }
       function setOverall(done, total) {
@@ -652,7 +671,13 @@
         apiRemaining = null;
         setApiUsage(apiCount, apiRemaining);
       }
-      return { open, close, setStatus, setDetail, setSubLabel, setOverall, setSub, setApiUsage, incApiUsage, resetApiUsage };
+      function setOverallScaled(done, total, startPct, endPct) {
+        const fraction = total > 0 ? done / total : 0;
+        const pct = Math.floor(startPct + fraction * (endPct - startPct));
+        overallBar.style.width = pct + "%";
+        overallPct.textContent = pct + "%";
+      }
+      return { open, close, setStatus, setDetail, setSubLabel, setOverall, setSub, setApiUsage, incApiUsage, resetApiUsage, setOverallScaled };
     }
 
     // Utility: parse Link header to find last page number if present
@@ -935,7 +960,7 @@
         const prByUser = groupRows(prRows, ["count", "merged"]);
         progress.setStatus("Rendering PR table…");
         progress.setSubLabel("Rows");
-        progress.setOverall(0, prByUser.size);
+        progress.setOverallScaled(0, prByUser.size, 95, 97);
 
         let prUserIndex = 0;
         const prUserEntries = Array.from(prByUser.entries());
@@ -943,6 +968,7 @@
         for (const [user, entry] of prUserEntries) {
           if (prUserIndex % 20 === 0) {
             progress.setSub(prUserIndex, prUserEntries.length);
+            progress.setOverallScaled(prUserIndex, prUserEntries.length, 95, 97);
             await new Promise(r => setTimeout(r, 0));
           }
           prUserIndex++;
@@ -1023,7 +1049,7 @@
         const reviewByUser = groupRows(reviewRows, ["reviewed", "actionedCount"]);
         progress.setStatus("Rendering Review table…");
         progress.setSubLabel("Rows");
-        progress.setOverall(0, reviewByUser.size);
+        progress.setOverallScaled(0, reviewByUser.size, 97, 100);
 
         let reviewUserIndex = 0;
         const reviewUserEntries = Array.from(reviewByUser.entries());
@@ -1031,6 +1057,7 @@
         for (const [user, entry] of reviewUserEntries) {
           if (reviewUserIndex % 20 === 0) {
             progress.setSub(reviewUserIndex, reviewUserEntries.length);
+            progress.setOverallScaled(reviewUserIndex, reviewUserEntries.length, 97, 100);
             await new Promise(r => setTimeout(r, 0));
           }
           reviewUserIndex++;
