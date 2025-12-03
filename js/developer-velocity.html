@@ -277,13 +277,25 @@
 
         // Build changed line set (final merged state) for actioned detection
         let changedLines = new Set();
-        if (pr.merged_at) {
+        // Always fetch files to get line counts, even if not merged
+        {
+          let totalChanged = 0;
           try {
-            const filesResp = await fetch(pr.url + "/files", { headers });
-            progress?.incApiUsage(filesResp);
-            if (filesResp.ok) {
+            let page = 1;
+            while (true) {
+              const filesUrl = new URL(pr.url + "/files");
+              filesUrl.searchParams.set("per_page", "100");
+              filesUrl.searchParams.set("page", page);
+              const filesResp = await fetch(filesUrl, { headers });
+              progress?.incApiUsage(filesResp);
+              if (!filesResp.ok) {
+                console.warn(`Failed to fetch files for PR ${pr.number} (page ${page}): ${filesResp.status} ${filesResp.statusText}`);
+                break;
+              }
+
               const files = await filesResp.json();
-              let totalChanged = 0; // only track total changed lines now
+              if (!files || files.length === 0) break;
+
               for (const file of files) {
                 const fileChanges = (file.changes != null) ? file.changes : 0;
                 totalChanged += fileChanges;
@@ -304,9 +316,15 @@
                   }
                 }
               }
-              pr._linesChanged = totalChanged;
+              if (files.length < 100) break;
+              page++;
+              // Small delay to be nice to the API
+              await new Promise(r => setTimeout(r, 50));
             }
-          } catch { }
+          } catch (e) {
+            console.error(`Error fetching files for PR ${pr.number}:`, e);
+          }
+          pr._linesChanged = totalChanged;
         }
 
         if (reviews.some(r => r.state === "APPROVED")) approvedSet.add(`${pr._repo}#${pr.number}`);
@@ -955,6 +973,17 @@
           return byUser;
         }
 
+        // Helper to find a user object with avatar across all months
+        function findUserWithAvatar(entry, username) {
+          for (const m of entry.months) {
+            if (m.prList && m.prList.length > 0 && m.prList[0].user?.avatar_url) return m.prList[0].user;
+            if (m.reviewedList && m.reviewedList.length > 0 && m.reviewedList[0].review?.user?.avatar_url) return m.reviewedList[0].review.user;
+            if (m.approvedList && m.approvedList.length > 0 && m.approvedList[0].user?.avatar_url) return m.approvedList[0].user;
+            if (m.mergedList && m.mergedList.length > 0 && m.mergedList[0].user?.avatar_url) return m.mergedList[0].user;
+          }
+          return { login: username };
+        }
+
         // PR Table
         const prByUser = groupRows(prRows, ["count", "merged"]);
         progress.setStatus("Rendering PR table…");
@@ -1004,7 +1033,7 @@
                     <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
                   </svg>
                 </span>
-                ${(() => { const userObj = entry.months[0]?.prList?.[0]?.user || { login: user }; const avatar = userObj.avatar_url ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">` : ""; return `${avatar}<span class=\"font-semibold\">${userObj.login}</span>`; })()}
+                ${(() => { const userObj = findUserWithAvatar(entry, user); const avatar = userObj.avatar_url ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">` : ""; return `${avatar}<span class=\"font-semibold\">${userObj.login}</span>`; })()}
               </td>
               <td class="p-3 border text-gray-500">All</td>
               <td class="p-3 border font-semibold pr-cell" data-type="count" data-user="${user}" data-month="all" style="cursor:pointer">${entry.totals.count}</td>
@@ -1080,7 +1109,7 @@
                     <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
                   </svg>
                 </span>
-                ${(() => { const userObj = entry.months[0]?.reviewedList?.[0]?.review?.user || { login: user }; const avatar = userObj.avatar_url ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">` : ""; return `${avatar}${renderUserCell(userObj)}`; })()}
+                ${(() => { const userObj = findUserWithAvatar(entry, user); const avatar = userObj.avatar_url ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">` : ""; return `${avatar}${renderUserCell(userObj)}`; })()}
               </td>
               <td class="p-3 border text-gray-500">All</td>
               <td class="p-3 border font-semibold pr-cell" data-type="reviewed" data-user="${user}" data-month="all" style="cursor:pointer">${totalReviewed}</td>
